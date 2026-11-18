@@ -1,0 +1,118 @@
+name: Build installers
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            runner: macos-15
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            build: --target universal-apple-darwin --bundles dmg
+            artifact: macos-universal-dmg
+            path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          - name: Windows
+            runner: windows-2025
+            targets: x86_64-pc-windows-msvc
+            build: --target x86_64-pc-windows-msvc --bundles nsis
+            artifact: windows-x64-nsis
+            path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+      - run: npm ci
+      - run: npm run tauri -- build ${{ matrix.build }} --ci
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.path }}
+          if-no-files-found: error
+
+  android:
+    name: Android
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    env:
+      NDK_VERSION: 28.2.13676358
+      BUILD_TOOLS: 37.0.0
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK and NDK
+        run: |
+          sdkmanager "platforms;android-36" "platforms;android-37.0" "build-tools;$BUILD_TOOLS" "ndk;$NDK_VERSION"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+      - run: npm ci
+      - run: npm run tauri -- android init --ci --skip-targets-install
+      - name: Build test APK
+        if: github.ref_type != 'tag'
+        run: |
+          npm run tauri -- android build --debug --apk --ci
+          cp src-tauri/gen/android/app/build/outputs/apk/universal/debug/*.apk "$RUNNER_TEMP/account-manager-debug.apk"
+      - name: Build release APK
+        if: github.ref_type == 'tag'
+        run: npm run tauri -- android build --apk --ci
+      - name: Sign release APK
+        if: github.ref_type == 'tag'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          umask 077
+          : "${ANDROID_KEYSTORE_BASE64:?Missing release keystore}"
+          keystore="$RUNNER_TEMP/android-release.keystore"
+          trap 'rm -f "$keystore"' EXIT
+          printf %s "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          "$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner" sign \
+            --ks "$keystore" --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "$RUNNER_TEMP/account-manager-release.apk" \
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/*-unsigned.apk
+      - name: Verify APK signature
+        run: '"$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner" verify "$RUNNER_TEMP"/account-manager-*.apk'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-universal-${{ github.ref_type == 'tag' && 'release' || 'debug' }}
+          path: ${{ runner.temp }}/account-manager-*.apk
+          if-no-files-found: error
