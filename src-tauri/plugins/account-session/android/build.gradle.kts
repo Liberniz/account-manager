@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.ldjx.accountmanager"
+    namespace = "com.ldjx.accountmanager.session"
     compileSdk = 36
 
     defaultConfig {
