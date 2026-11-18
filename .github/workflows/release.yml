@@ -4,6 +4,13 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      android_variant:
+        description: Android build type
+        type: choice
+        options: [release, debug]
+        default: release
+        required: true
 
 permissions:
   contents: read
@@ -58,6 +65,7 @@ jobs:
     env:
       NDK_VERSION: 28.2.13676358
       BUILD_TOOLS: 37.0.0
+      APK_VARIANT: ${{ github.ref_type == 'tag' && 'release' || inputs.android_variant }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -70,10 +78,9 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@v3
       - name: Install Android SDK and NDK
         run: |
-          sdkmanager "platforms;android-36" "platforms;android-37.0" "build-tools;$BUILD_TOOLS" "ndk;$NDK_VERSION"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "platforms;android-37.0" "build-tools;$BUILD_TOOLS" "ndk;$NDK_VERSION"
           echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -84,15 +91,15 @@ jobs:
       - run: npm ci
       - run: npm run tauri -- android init --ci --skip-targets-install
       - name: Build test APK
-        if: github.ref_type != 'tag'
+        if: env.APK_VARIANT == 'debug'
         run: |
           npm run tauri -- android build --debug --apk --ci
           cp src-tauri/gen/android/app/build/outputs/apk/universal/debug/*.apk "$RUNNER_TEMP/account-manager-debug.apk"
       - name: Build release APK
-        if: github.ref_type == 'tag'
+        if: env.APK_VARIANT == 'release'
         run: npm run tauri -- android build --apk --ci
       - name: Sign release APK
-        if: github.ref_type == 'tag'
+        if: env.APK_VARIANT == 'release'
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -113,6 +120,6 @@ jobs:
         run: '"$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner" verify "$RUNNER_TEMP"/account-manager-*.apk'
       - uses: actions/upload-artifact@v7
         with:
-          name: android-universal-${{ github.ref_type == 'tag' && 'release' || 'debug' }}
+          name: android-universal-${{ env.APK_VARIANT }}
           path: ${{ runner.temp }}/account-manager-*.apk
           if-no-files-found: error
