@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "MultiAgentAccountManager",
+  "productName": "叠号",
   "version": "0.1.0",
   "identifier": "com.ldjx.accountmanager",
   "build": {
@@ -17,9 +17,16 @@
   },
   "bundle": {
     "active": true,
+    "shortDescription": "AI 助手账号切换器",
     "targets": ["dmg", "nsis"],
     "macOS": {
       "minimumSystemVersion": "14.0"
+    },
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      }
     },
     "android": {
       "minSdkVersion": 24

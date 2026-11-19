@@ -17,6 +17,27 @@ pub struct AccountKey {
   pub uuid: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaDetail {
+  #[serde(default)]
+  pub plan_label: String,
+  #[serde(default)]
+  pub plan_value: String,
+  #[serde(default)]
+  pub plan_subtext: Option<String>,
+  #[serde(default)]
+  pub plan_used_percent: Option<u8>,
+  #[serde(default)]
+  pub extra_label: Option<String>,
+  #[serde(default)]
+  pub extra_value: Option<String>,
+  #[serde(default)]
+  pub extra_subtext: Option<String>,
+  #[serde(default)]
+  pub extra_used_percent: Option<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountRecord {
@@ -24,6 +45,16 @@ pub struct AccountRecord {
   pub uuid: String,
   pub alias: String,
   pub created_at_ms: u64,
+  #[serde(default)]
+  pub auto_alias: bool,
+  #[serde(default)]
+  pub avatar_url: Option<String>,
+  #[serde(default)]
+  pub quota_text: Option<String>,
+  #[serde(default)]
+  pub quota_percent: Option<u8>,
+  #[serde(default)]
+  pub quota_detail: Option<QuotaDetail>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,11 +190,48 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
         .and_then(|v| v.as_u64())
         .unwrap_or_else(now_ms);
 
+      let auto_alias = item_obj
+        .get("autoAlias")
+        .or_else(|| item_obj.get("auto_alias"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+      let avatar_url = item_obj
+        .get("avatarUrl")
+        .or_else(|| item_obj.get("avatar_url"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+      let quota_detail = item_obj
+        .get("quotaDetail")
+        .or_else(|| item_obj.get("quota_detail"))
+        .and_then(|v| serde_json::from_value::<QuotaDetail>(v.clone()).ok())
+        .filter(|d| !d.plan_label.trim().is_empty() || !d.plan_value.trim().is_empty());
+      let mut quota_text = item_obj
+        .get("quotaText")
+        .or_else(|| item_obj.get("quota_text"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+      let mut quota_percent = item_obj
+        .get("quotaPercent")
+        .or_else(|| item_obj.get("quota_percent"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n.min(100) as u8);
+      if quota_detail.is_none() && quota_text.as_deref() == Some("剩余额度 100%") {
+        quota_text = None;
+        quota_percent = None;
+      }
+
       accounts.push(AccountRecord {
         provider_id,
         uuid,
         alias,
         created_at_ms,
+        auto_alias,
+        avatar_url,
+        quota_text,
+        quota_percent,
+        quota_detail,
       });
     }
   }

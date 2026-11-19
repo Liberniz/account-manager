@@ -16,6 +16,7 @@
     "allow-set-modal-active",
     "allow-open-official-site",
     "allow-resolve-uuid-conflict",
-    "allow-dismiss-notice"
+    "allow-dismiss-notice",
+    "allow-trigger-quota-sync"
   ]
 }

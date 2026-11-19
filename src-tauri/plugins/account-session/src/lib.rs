@@ -18,6 +18,7 @@ pub struct OpenAndroidAccountPayload {
   pub provider_name: String,
   pub uuid: String,
   pub alias: String,
+  pub auto_alias: bool,
   pub entry_url: String,
   pub allowed_hosts: Vec<String>,
   pub switch_seq: u64,
@@ -44,6 +45,22 @@ pub enum AndroidSessionEvent {
     switch_seq: u64,
     view_instance_id: u64,
     url: String,
+  },
+  #[serde(rename_all = "camelCase")]
+  IdentityDetected {
+    provider_id: String,
+    uuid: String,
+    switch_seq: u64,
+    view_instance_id: u64,
+    identity: String,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    quota_text: Option<String>,
+    #[serde(default)]
+    quota_percent: Option<u8>,
+    #[serde(default)]
+    quota_detail_json: Option<String>,
   },
   #[serde(rename_all = "camelCase")]
   SessionFailed {

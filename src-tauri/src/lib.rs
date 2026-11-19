@@ -23,11 +23,12 @@ async fn select_provider(
 
 #[tauri::command]
 async fn add_account(
+  app: AppHandle,
   mgr: State<'_, Arc<SessionManager>>,
   provider_id: String,
   alias: String,
 ) -> Result<ManagerSnapshot, String> {
-  mgr.add_account(&provider_id, &alias).await
+  mgr.add_account(&app, &provider_id, &alias).await
 }
 
 #[tauri::command]
@@ -93,6 +94,15 @@ async fn dismiss_notice(mgr: State<'_, Arc<SessionManager>>) -> Result<ManagerSn
   Ok(mgr.dismiss_notice().await)
 }
 
+#[tauri::command]
+async fn trigger_quota_sync(
+  app: AppHandle,
+  mgr: State<'_, Arc<SessionManager>>,
+) -> Result<ManagerSnapshot, String> {
+  mgr.trigger_silent_sync(&app, true).await;
+  Ok(mgr.get_snapshot().await)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   let builder = tauri::Builder::default();
@@ -138,6 +148,13 @@ pub fn run() {
               mgr_inner.recompute_desktop_bounds(&app_inner).await;
             });
           }
+          tauri::WindowEvent::Focused(focused) if *focused => {
+            let app_inner = app_for_resize.clone();
+            let mgr_inner = Arc::clone(&mgr_for_resize);
+            tauri::async_runtime::spawn(async move {
+              mgr_inner.trigger_silent_sync(&app_inner, false).await;
+            });
+          }
           _ => {}
         });
       }
@@ -172,6 +189,7 @@ pub fn run() {
       open_official_site,
       resolve_uuid_conflict,
       dismiss_notice,
+      trigger_quota_sync,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

@@ -9,6 +9,7 @@ const APP_COMMANDS: &[&str] = &[
   "open_official_site",
   "resolve_uuid_conflict",
   "dismiss_notice",
+  "trigger_quota_sync",
 ];
 
 fn main() {

@@ -5,10 +5,9 @@ dist-ssr
 .DS_Store
 src-tauri/target
 src-tauri/gen/schemas
-src-tauri/gen/android/.gradle
-src-tauri/gen/android/build
-src-tauri/gen/android/app/build
-src-tauri/gen/android/local.properties
+src-tauri/gen/android
+src-tauri/plugins/account-session/android/build
+src-tauri/plugins/account-session/android/.tauri
 .env
 .env.*
 *.keystore

@@ -11,6 +11,7 @@ data class AndroidAccountSessionSpec(
     val providerName: String,
     val uuid: String,
     val alias: String,
+    val autoAlias: Boolean,
     val entryUrl: String,
     val allowedHosts: List<String>,
     val switchSeq: Long,
@@ -53,6 +54,7 @@ object AccountSessionCoordinator {
 
     fun beginSession(spec: AndroidAccountSessionSpec): AccountWebActivity? {
         synchronized(lock) {
+            if (spec.switchSeq < latestSwitchSeq) return null
             latestSwitchSeq = spec.switchSeq
             activeSpec = spec
             return activityRef?.get()
@@ -114,9 +116,8 @@ object AccountSessionCoordinator {
 
     fun invalidateAndClose(nextSeq: Long): AccountWebActivity? {
         synchronized(lock) {
-            if (nextSeq > latestSwitchSeq) {
-                latestSwitchSeq = nextSeq
-            }
+            if (nextSeq < latestSwitchSeq) return null
+            latestSwitchSeq = nextSeq
             activeSpec = null
             return activityRef?.get()
         }
@@ -158,6 +159,38 @@ object AccountSessionCoordinator {
             put("switchSeq", spec.switchSeq)
             put("viewInstanceId", spec.viewInstanceId)
             put("url", url)
+        }
+        ch.send(obj)
+    }
+
+    fun emitIdentityDetected(
+        spec: AndroidAccountSessionSpec,
+        identity: String,
+        avatarUrl: String?,
+        quotaText: String?,
+        quotaPercent: Int?,
+        quotaDetailJson: String?,
+    ) {
+        val ch = synchronized(lock) {
+            if (!isCurrent(spec.switchSeq, spec.viewInstanceId)) return
+            if (identity.isNotEmpty() && activeSpec?.autoAlias == true) {
+                activeSpec = activeSpec?.copy(autoAlias = false, alias = identity)
+                committedSpec = committedSpec?.copy(autoAlias = false, alias = identity)
+            }
+            eventChannel
+        } ?: return
+
+        val obj = JSObject().apply {
+            put("kind", "identityDetected")
+            put("providerId", spec.providerId)
+            put("uuid", spec.uuid)
+            put("switchSeq", spec.switchSeq)
+            put("viewInstanceId", spec.viewInstanceId)
+            put("identity", identity)
+            if (!avatarUrl.isNullOrEmpty()) put("avatarUrl", avatarUrl)
+            if (!quotaText.isNullOrEmpty()) put("quotaText", quotaText)
+            if (quotaPercent != null) put("quotaPercent", quotaPercent)
+            if (!quotaDetailJson.isNullOrEmpty()) put("quotaDetailJson", quotaDetailJson)
         }
         ch.send(obj)
     }

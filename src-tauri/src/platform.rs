@@ -26,16 +26,16 @@ pub fn open_external_browser(url: &str) -> Result<(), String> {
 }
 
 #[cfg(desktop)]
-pub async fn verify_desktop_profile_binding(
+pub fn verify_desktop_profile_binding(
   webview: &tauri::Webview,
   expected_uuid: Uuid,
   expected_dir: &Path,
-) -> Result<(), String> {
+) -> impl std::future::Future<Output = Result<(), String>> + Send {
   #[cfg(target_os = "macos")]
   {
     let _ = expected_dir;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    webview
+    let res = webview
       .with_webview(move |platform_wv| unsafe {
         let wk: &objc2_web_kit::WKWebView = &*platform_wv.inner().cast();
         let store = wk.configuration().websiteDataStore();
@@ -54,12 +54,14 @@ pub async fn verify_desktop_profile_binding(
           None => Err("WKWebsiteDataStore 未绑定独立 UUID（落入默认资料），已阻止加载".to_string()),
         };
         let _ = tx.send(check);
-      })
-      .map_err(|e| format!("访问 macOS WebView 失败: {e}"))?;
+      });
 
-    return rx
-      .await
-      .map_err(|_| "核对 macOS WKWebsiteDataStore 超时或中断".to_string())?;
+    async move {
+      res.map_err(|e| format!("访问 macOS WebView 失败: {e}"))?;
+      rx
+        .await
+        .map_err(|_| "核对 macOS WKWebsiteDataStore 超时或中断".to_string())?
+    }
   }
 
   #[cfg(windows)]
@@ -67,7 +69,7 @@ pub async fn verify_desktop_profile_binding(
     let _ = expected_uuid;
     let expected_owned = expected_dir.to_path_buf();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    webview
+    let res = webview
       .with_webview(move |platform_wv| unsafe {
         use webview2_com::Microsoft::Web::WebView2::Win32::{
           ICoreWebView2Environment7, ICoreWebView2_2,
@@ -108,18 +110,20 @@ pub async fn verify_desktop_profile_binding(
           }
         })();
         let _ = tx.send(check);
-      })
-      .map_err(|e| format!("访问 Windows WebView2 失败: {e}"))?;
+      });
 
-    return rx
-      .await
-      .map_err(|_| "核对 Windows WebView2 数据目录中断".to_string())?;
+    async move {
+      res.map_err(|e| format!("访问 Windows WebView2 失败: {e}"))?;
+      rx
+        .await
+        .map_err(|_| "核对 Windows WebView2 数据目录中断".to_string())?
+    }
   }
 
   #[cfg(all(not(target_os = "macos"), not(windows)))]
   {
     let _ = (webview, expected_uuid, expected_dir);
-    Ok(())
+    async move { Ok(()) }
   }
 }
 
@@ -194,9 +198,9 @@ pub async fn delete_desktop_profile(
       })
       .map_err(|e| format!("调度主线程清理 WKWebsiteDataStore 失败: {e}"))?;
 
-    return rx
+    rx
       .await
-      .map_err(|_| "等待 WKWebsiteDataStore 清理完成中断".to_string())?;
+      .map_err(|_| "等待 WKWebsiteDataStore 清理完成中断".to_string())?
   }
 
   #[cfg(not(target_os = "macos"))]

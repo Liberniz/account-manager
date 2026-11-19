@@ -25,6 +25,7 @@ class OpenSessionArgs {
     var providerName: String = ""
     var uuid: String = ""
     var alias: String = ""
+    var autoAlias: Boolean = false
     var entryUrl: String = ""
     var allowedHosts: Array<String> = emptyArray()
     var switchSeq: Long = 0L
@@ -106,6 +107,7 @@ class AccountSessionPlugin(private val activity: Activity) : Plugin(activity) {
                 providerName = args.providerName,
                 uuid = args.uuid,
                 alias = args.alias,
+                autoAlias = args.autoAlias,
                 entryUrl = args.entryUrl,
                 allowedHosts = args.allowedHosts.toList(),
                 switchSeq = args.switchSeq,
@@ -114,6 +116,10 @@ class AccountSessionPlugin(private val activity: Activity) : Plugin(activity) {
             )
 
             val existing = AccountSessionCoordinator.beginSession(spec)
+            if (!AccountSessionCoordinator.isCurrent(spec.switchSeq, spec.viewInstanceId)) {
+                invoke.reject("切换请求已过期")
+                return@runOnUiThread
+            }
             if (existing != null && !existing.isFinishing && !existing.isDestroyed) {
                 existing.bindSessionSpec(spec)
             } else {
@@ -139,8 +145,9 @@ class AccountSessionPlugin(private val activity: Activity) : Plugin(activity) {
     fun closeActiveSession(invoke: Invoke) {
         val args = invoke.parseArgs(CloseSessionArgs::class.java)
         activity.runOnUiThread {
+            val previous = AccountSessionCoordinator.currentActiveSpec()
             val act = AccountSessionCoordinator.invalidateAndClose(args.switchSeq)
-            act?.closeAndFinishFromManager()
+            act?.closeAndFinishFromManager(keepPage = previous != null && args.switchSeq > previous.switchSeq)
             invoke.resolve(JSObject())
         }
     }
@@ -158,6 +165,7 @@ class AccountSessionPlugin(private val activity: Activity) : Plugin(activity) {
                     invoke.reject("目标 Profile 视图尚未销毁")
                     return@runOnUiThread
                 }
+                RecentAccountPages.discardProfile(args.uuid)
                 val store = ProfileStore.getInstance()
                 if (store.allProfileNames.contains(args.uuid)) {
                     val deleted = store.deleteProfile(args.uuid)

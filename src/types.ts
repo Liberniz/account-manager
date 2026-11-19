@@ -13,7 +13,19 @@ export interface ProviderInfo {
   statusText: string;
   entryUrl: string;
   homepageUrl: string;
+  callbackOrigins: string[];
   verifiedMethods: string[];
+}
+
+export interface QuotaDetail {
+  planLabel: string;
+  planValue: string;
+  planSubtext: string | null;
+  planUsedPercent: number | null;
+  extraLabel: string | null;
+  extraValue: string | null;
+  extraSubtext: string | null;
+  extraUsedPercent: number | null;
 }
 
 export interface AccountRecord {
@@ -21,6 +33,11 @@ export interface AccountRecord {
   uuid: string;
   alias: string;
   createdAtMs: number;
+  autoAlias: boolean;
+  avatarUrl: string | null;
+  quotaText: string | null;
+  quotaPercent: number | null;
+  quotaDetail: QuotaDetail | null;
 }
 
 export interface ConflictItem {
@@ -35,6 +52,7 @@ export interface ManagerSnapshot {
   selectedProviderId: ProviderId;
   activeAccount: AccountKey | null;
   switchingAccount: AccountKey | null;
+  warmAccounts: AccountKey[];
   lastCommitted: AccountKey | null;
   pendingCleanup: AccountKey[];
   conflicts: ConflictItem[];
