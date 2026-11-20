@@ -93,6 +93,13 @@ pub enum AndroidSessionEvent {
     percent: Option<u8>,
     message: String,
   },
+  #[serde(rename_all = "camelCase")]
+  SessionLoggedOut {
+    provider_id: String,
+    uuid: String,
+    switch_seq: u64,
+    view_instance_id: u64,
+  },
 }
 
 #[cfg(target_os = "android")]

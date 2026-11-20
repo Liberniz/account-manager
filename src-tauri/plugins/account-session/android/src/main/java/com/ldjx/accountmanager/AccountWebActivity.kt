@@ -329,22 +329,47 @@ class AccountWebActivity : AppCompatActivity() {
                 const host = (location.hostname || '').toLowerCase();
                 const path = (location.pathname || '').toLowerCase();
                 const isPrimary = host === 'muse.ai' || host.endsWith('.muse.ai') || host === 'app.hark.com' || host.endsWith('.hark.com');
-                if (!isPrimary || document.readyState !== 'complete') {
-                  return JSON.stringify({ auth: false, typed, email: '' });
-                }
-                if (host.endsWith('hark.com') && /^\/(login|signin|signup|auth)\b/.test(path)) {
-                  return JSON.stringify({ auth: false, typed, email: '' });
+                const isExternalLoginHost = host === 'meta.com' || host.endsWith('.meta.com') || host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'appleid.apple.com';
+                const makeLoggedOut = () => {
+                  window.__maamQuota = null;
+                  window.__maamQuotaDetail = null;
+                  try {
+                    localStorage.removeItem('__maam_cached_quota__');
+                    localStorage.removeItem('__maam_cached_quota_detail_v2__');
+                  } catch (_) {}
+                  return JSON.stringify({ auth: false, loggedOut: true, typed, email: '' });
+                };
+                const makeLoading = () => JSON.stringify({ auth: false, loggedOut: false, typed, email: '' });
+                if (document.readyState !== 'complete') {
+                  return makeLoading();
                 }
                 const loginInputs = document.querySelectorAll('input[type="email"], input[type="password"], input[placeholder*="邮箱"], input[placeholder*="手机"], input[placeholder*="email" i], input[placeholder*="phone" i]');
-                for (const inp of loginInputs) {
-                  const r = inp.getBoundingClientRect();
-                  if (r.width > 20 && r.height > 15) {
-                    return JSON.stringify({ auth: false, typed, email: '' });
+                const hasVisibleLoginInput = () => {
+                  for (const inp of loginInputs) {
+                    if (inp.disabled || inp.readOnly) continue;
+                    const r = inp.getBoundingClientRect();
+                    if (r.width > 20 && r.height > 15) return true;
                   }
+                  return false;
+                };
+                if (isExternalLoginHost) {
+                  if (/^\/(login|signin|signup|auth)\b/.test(path) || hasVisibleLoginInput()) {
+                    return makeLoggedOut();
+                  }
+                  return makeLoading();
+                }
+                if (!isPrimary) {
+                  return makeLoading();
+                }
+                if (/^\/(login|signin|signup|auth)\b/.test(path)) {
+                  return makeLoggedOut();
+                }
+                if (!/^\/(settings|profile|account)\b/.test(path) && hasVisibleLoginInput()) {
+                  return makeLoggedOut();
                 }
                 const bodyText = (document.body && document.body.innerText) || '';
-                if (/登录或创建账户|Log in or sign up/i.test(bodyText)) {
-                  return JSON.stringify({ auth: false, typed, email: '' });
+                if (/登录或创建账户|Log in or sign up|Sign in to|登录以继续/i.test(bodyText)) {
+                  return makeLoggedOut();
                 }
                 const bad = /^(support|privacy|help|legal|press|noreply|no-reply|info|security|contact|abuse|feedback|sales|terms)@/i;
                 const re = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
@@ -499,12 +524,12 @@ class AccountWebActivity : AppCompatActivity() {
                 for (const c of candidates) {
                   const clean = c.toLowerCase();
                   if (!bad.test(clean) && !clean.endsWith('@example.com') && !clean.endsWith('@sentry.io')) {
-                    return JSON.stringify({ auth: true, typed, email: clean, avatar: av, quotaText: qText, quotaPct: qPct, quotaDetail: qDetailStr });
+                    return JSON.stringify({ auth: true, loggedOut: false, typed, email: clean, avatar: av, quotaText: qText, quotaPct: qPct, quotaDetail: qDetailStr });
                   }
                 }
-                return JSON.stringify({ auth: true, typed, email: '', avatar: av, quotaText: qText, quotaPct: qPct, quotaDetail: qDetailStr });
+                return JSON.stringify({ auth: true, loggedOut: false, typed, email: '', avatar: av, quotaText: qText, quotaPct: qPct, quotaDetail: qDetailStr });
               } catch (_) {
-                return JSON.stringify({ auth: false, typed: '', email: '' });
+                return JSON.stringify({ auth: false, loggedOut: false, typed: '', email: '' });
               }
             })()
         """
@@ -1133,6 +1158,7 @@ class AccountWebActivity : AppCompatActivity() {
 
     private data class ProbeData(
         val auth: Boolean,
+        val loggedOut: Boolean,
         val typed: String,
         val email: String,
         val avatar: String,
@@ -1143,6 +1169,8 @@ class AccountWebActivity : AppCompatActivity() {
 
     private fun startIdentityProbeLoop(spec: AndroidAccountSessionSpec) {
         stopIdentityProbeLoop()
+        var consecutiveLoggedOut = 0
+        var loggedOutReported = false
         val task = object : Runnable {
             override fun run() {
                 if (!AccountSessionCoordinator.isCurrent(spec.switchSeq, spec.viewInstanceId)) {
@@ -1168,6 +1196,8 @@ class AccountWebActivity : AppCompatActivity() {
                             capturedIdentityHint = parsed.typed
                         }
                         if (parsed.auth) {
+                            consecutiveLoggedOut = 0
+                            loggedOutReported = false
                             val resolved = parsed.email.ifEmpty { capturedIdentityHint.orEmpty() }
                             AccountSessionCoordinator.emitIdentityDetected(
                                 spec,
@@ -1177,6 +1207,17 @@ class AccountWebActivity : AppCompatActivity() {
                                 parsed.quotaPct,
                                 parsed.quotaDetailJson.ifEmpty { null },
                             )
+                        } else if (parsed.loggedOut) {
+                            consecutiveLoggedOut += 1
+                            if (consecutiveLoggedOut == 1) {
+                                uiHandler.removeCallbacks(this)
+                                uiHandler.postDelayed(this, 1000L)
+                            } else if (consecutiveLoggedOut >= 2 && !loggedOutReported) {
+                                loggedOutReported = true
+                                AccountSessionCoordinator.emitSessionLoggedOut(spec)
+                            }
+                        } else {
+                            consecutiveLoggedOut = 0
                         }
                     }
                 }
@@ -1195,6 +1236,7 @@ class AccountWebActivity : AppCompatActivity() {
             val pctRaw = obj.optInt("quotaPct", -1)
             ProbeData(
                 auth = obj.optBoolean("auth", false),
+                loggedOut = obj.optBoolean("loggedOut", false),
                 typed = obj.optString("typed", ""),
                 email = obj.optString("email", ""),
                 avatar = obj.optString("avatar", ""),

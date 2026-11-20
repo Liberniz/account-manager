@@ -270,4 +270,20 @@ object AccountSessionCoordinator {
         }
         ch.send(obj)
     }
+
+    fun emitSessionLoggedOut(spec: AndroidAccountSessionSpec) {
+        val ch = synchronized(lock) {
+            if (!isCurrent(spec.switchSeq, spec.viewInstanceId)) return
+            eventChannel
+        } ?: return
+
+        val obj = JSObject().apply {
+            put("kind", "sessionLoggedOut")
+            put("providerId", spec.providerId)
+            put("uuid", spec.uuid)
+            put("switchSeq", spec.switchSeq)
+            put("viewInstanceId", spec.viewInstanceId)
+        }
+        ch.send(obj)
+    }
 }

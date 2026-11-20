@@ -38,6 +38,15 @@ pub struct QuotaDetail {
   pub extra_used_percent: Option<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthState {
+  #[default]
+  Unknown,
+  Authenticated,
+  LoggedOut,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountRecord {
@@ -55,6 +64,8 @@ pub struct AccountRecord {
   pub quota_percent: Option<u8>,
   #[serde(default)]
   pub quota_detail: Option<QuotaDetail>,
+  #[serde(default)]
+  pub auth_state: AuthState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,7 +212,12 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
-      let quota_detail = item_obj
+      let auth_state = item_obj
+        .get("authState")
+        .or_else(|| item_obj.get("auth_state"))
+        .and_then(|v| serde_json::from_value::<AuthState>(v.clone()).ok())
+        .unwrap_or_default();
+      let mut quota_detail = item_obj
         .get("quotaDetail")
         .or_else(|| item_obj.get("quota_detail"))
         .and_then(|v| serde_json::from_value::<QuotaDetail>(v.clone()).ok())
@@ -221,6 +237,11 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
         quota_text = None;
         quota_percent = None;
       }
+      if auth_state == AuthState::LoggedOut {
+        quota_detail = None;
+        quota_text = None;
+        quota_percent = None;
+      }
 
       accounts.push(AccountRecord {
         provider_id,
@@ -232,6 +253,7 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
         quota_text,
         quota_percent,
         quota_detail,
+        auth_state,
       });
     }
   }

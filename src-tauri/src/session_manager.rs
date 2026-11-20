@@ -5,7 +5,7 @@ use crate::providers::{
 };
 use crate::storage::{
   detect_conflicts, load_or_migrate_store, normalize_uuid, now_ms, save_store_atomic, AccountKey,
-  AccountRecord, AccountsStoreFile, ConflictItem, QuotaDetail,
+  AccountRecord, AccountsStoreFile, AuthState, ConflictItem, QuotaDetail,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -457,22 +457,47 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
     const host = (location.hostname || '').toLowerCase();
     const path = (location.pathname || '').toLowerCase();
     const isPrimary = host === 'muse.ai' || host.endsWith('.muse.ai') || host === 'app.hark.com' || host.endsWith('.hark.com');
-    if (!isPrimary || document.readyState !== 'complete') {
-      return JSON.stringify({ auth: false, typed: typed || phone, email: '', avatar: '', quotaText: '', quotaPct: null, pendingHotkey });
-    }
-    if (host.endsWith('hark.com') && /^\/(login|signin|signup|auth)\b/.test(path)) {
-      return JSON.stringify({ auth: false, typed: typed || phone, email: '', avatar: '', quotaText: '', quotaPct: null, pendingHotkey });
+    const isExternalLoginHost = host === 'meta.com' || host.endsWith('.meta.com') || host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'appleid.apple.com';
+    const makeLoggedOut = () => {
+      window.__maamQuota = null;
+      window.__maamQuotaDetail = null;
+      try {
+        localStorage.removeItem('__maam_cached_quota__');
+        localStorage.removeItem('__maam_cached_quota_detail_v2__');
+      } catch (_) {}
+      return JSON.stringify({ auth: false, loggedOut: true, typed: typed || phone, email: '', avatar: '', quotaText: '', quotaPct: null, quotaDetail: null, pendingHotkey });
+    };
+    const makeLoading = () => JSON.stringify({ auth: false, loggedOut: false, typed: typed || phone, email: '', avatar: '', quotaText: '', quotaPct: null, quotaDetail: null, pendingHotkey });
+    if (document.readyState !== 'complete') {
+      return makeLoading();
     }
     const loginInputs = document.querySelectorAll('input[type="email"], input[type="password"], input[placeholder*="邮箱"], input[placeholder*="手机"], input[placeholder*="email" i], input[placeholder*="phone" i]');
-    for (const inp of loginInputs) {
-      const r = inp.getBoundingClientRect();
-      if (r.width > 20 && r.height > 15) {
-        return JSON.stringify({ auth: false, typed: typed || phone, email: '', avatar: '', quotaText: '', quotaPct: null, pendingHotkey });
+    const hasVisibleLoginInput = () => {
+      for (const inp of loginInputs) {
+        if (inp.disabled || inp.readOnly) continue;
+        const r = inp.getBoundingClientRect();
+        if (r.width > 20 && r.height > 15) return true;
       }
+      return false;
+    };
+    if (isExternalLoginHost) {
+      if (/^\/(login|signin|signup|auth)\b/.test(path) || hasVisibleLoginInput()) {
+        return makeLoggedOut();
+      }
+      return makeLoading();
+    }
+    if (!isPrimary) {
+      return makeLoading();
+    }
+    if (/^\/(login|signin|signup|auth)\b/.test(path)) {
+      return makeLoggedOut();
+    }
+    if (!/^\/(settings|profile|account)\b/.test(path) && hasVisibleLoginInput()) {
+      return makeLoggedOut();
     }
     const bodyText = (document.body && document.body.innerText) || '';
-    if (/登录或创建账户|Log in or sign up/i.test(bodyText)) {
-      return JSON.stringify({ auth: false, typed: typed || phone, email: '', avatar: '', quotaText: '', quotaPct: null, pendingHotkey });
+    if (/登录或创建账户|Log in or sign up|Sign in to|登录以继续/i.test(bodyText)) {
+      return makeLoggedOut();
     }
 
     const extractAvatar = () => {
@@ -650,6 +675,7 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
     }
     return JSON.stringify({
       auth: true,
+      loggedOut: false,
       typed: typed || phone,
       email: foundEmail,
       avatar,
@@ -659,7 +685,7 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
       pendingHotkey
     });
   } catch (_) {
-    return JSON.stringify({ auth: false, typed: '', email: '', avatar: '', quotaText: '', quotaPct: null, quotaDetail: null, pendingHotkey: null });
+    return JSON.stringify({ auth: false, loggedOut: false, typed: '', email: '', avatar: '', quotaText: '', quotaPct: null, quotaDetail: null, pendingHotkey: null });
   }
 })()"#;
 
@@ -1217,6 +1243,7 @@ impl SessionManager {
         quota_text: None,
         quota_percent: None,
         quota_detail: None,
+        auth_state: AuthState::LoggedOut,
       });
       save_store_atomic(&locked.store_path, &locked.store)?;
       locked.selected_provider_id = provider_id;
@@ -1525,6 +1552,8 @@ impl SessionManager {
                     probe.quota_detail,
                   )
                   .await;
+              } else if probe.logged_out {
+                mgr.apply_logged_out_state(&app_handle, key, vid).await;
               }
             }
           });
@@ -2769,6 +2798,30 @@ impl SessionManager {
           },
         );
       }
+      AndroidSessionEvent::SessionLoggedOut {
+        provider_id,
+        uuid,
+        switch_seq,
+        view_instance_id,
+      } => {
+        let _ = switch_seq;
+        let Some(pid) = ProviderId::parse(&provider_id) else {
+          return;
+        };
+        let Some(norm_uuid) = normalize_uuid(&uuid) else {
+          return;
+        };
+        self
+          .apply_logged_out_state(
+            app,
+            AccountKey {
+              provider_id: pid,
+              uuid: norm_uuid,
+            },
+            view_instance_id,
+          )
+          .await;
+      }
     }
   }
 
@@ -2898,6 +2951,7 @@ impl SessionManager {
     let mgr = Arc::clone(self);
     tauri::async_runtime::spawn(async move {
       let mut tick_count: u32 = 0;
+      let mut consecutive_logged_out: u8 = 0;
       loop {
         let delay_ms = if tick_count < 6 { 950 } else { 6500 };
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -2994,6 +3048,7 @@ impl SessionManager {
         };
 
         if probe.is_auth {
+          consecutive_logged_out = 0;
           mgr
             .apply_detected_metadata(
               &app,
@@ -3014,6 +3069,15 @@ impl SessionManager {
               probe.quota_detail,
             )
             .await;
+        } else if probe.logged_out {
+          consecutive_logged_out = consecutive_logged_out.saturating_add(1);
+          if consecutive_logged_out >= 2 {
+            mgr
+              .apply_logged_out_state(&app, key.clone(), view_instance_id)
+              .await;
+          }
+        } else {
+          consecutive_logged_out = 0;
         }
       }
     });
@@ -3040,6 +3104,7 @@ impl SessionManager {
     let inner_json = serde_json::from_str::<String>(&raw).ok()?;
     let val = serde_json::from_str::<serde_json::Value>(&inner_json).ok()?;
     let is_auth = val.get("auth").and_then(|v| v.as_bool()).unwrap_or(false);
+    let logged_out = val.get("loggedOut").and_then(|v| v.as_bool()).unwrap_or(false);
     let typed = val
       .get("typed")
       .and_then(|v| v.as_str())
@@ -3080,6 +3145,7 @@ impl SessionManager {
 
     Some(DesktopProbeResult {
       is_auth,
+      logged_out,
       typed,
       email,
       avatar,
@@ -3088,6 +3154,71 @@ impl SessionManager {
       quota_detail,
       pending_hotkey,
     })
+  }
+
+  fn is_view_instance_valid(locked: &InnerState, key: &AccountKey, view_instance_id: u64) -> bool {
+    #[cfg(desktop)]
+    {
+      locked
+        .warm_pool
+        .get(key)
+        .map(|e| e.view_instance_id == view_instance_id)
+        .unwrap_or(false)
+    }
+    #[cfg(not(desktop))]
+    {
+      locked
+        .active_slot
+        .as_ref()
+        .map(|s| s.account_key == *key && s.view_instance_id == view_instance_id)
+        .unwrap_or(false)
+    }
+  }
+
+  async fn apply_logged_out_state(
+    &self,
+    app: &AppHandle,
+    key: AccountKey,
+    view_instance_id: u64,
+  ) {
+    let snap_opt = {
+      let mut locked = self.inner.lock().await;
+      if !Self::is_view_instance_valid(&locked, &key, view_instance_id) {
+        return;
+      }
+
+      let Some(target) = locked
+        .store
+        .accounts
+        .iter_mut()
+        .find(|a| a.provider_id == key.provider_id && a.uuid == key.uuid)
+      else {
+        return;
+      };
+
+      if target.auth_state == AuthState::LoggedOut
+        && target.quota_detail.is_none()
+        && target.quota_text.is_none()
+        && target.quota_percent.is_none()
+      {
+        return;
+      }
+
+      target.auth_state = AuthState::LoggedOut;
+      target.quota_detail = None;
+      target.quota_text = None;
+      target.quota_percent = None;
+
+      if save_store_atomic(&locked.store_path, &locked.store).is_err() {
+        return;
+      }
+
+      Some(Self::snapshot_from_locked(&locked))
+    };
+
+    if let Some(snap) = snap_opt {
+      self.emit_snapshot(app, &snap);
+    }
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -3104,27 +3235,8 @@ impl SessionManager {
   ) {
     let snap_opt = {
       let mut locked = self.inner.lock().await;
-      #[cfg(desktop)]
-      {
-        let valid_view = locked
-          .warm_pool
-          .get(&key)
-          .map(|e| e.view_instance_id == view_instance_id)
-          .unwrap_or(false);
-        if !valid_view {
-          return;
-        }
-      }
-      #[cfg(not(desktop))]
-      {
-        let valid_view = locked
-          .active_slot
-          .as_ref()
-          .map(|s| s.account_key == key && s.view_instance_id == view_instance_id)
-          .unwrap_or(false);
-        if !valid_view {
-          return;
-        }
+      if !Self::is_view_instance_valid(&locked, &key, view_instance_id) {
+        return;
       }
 
       let Some(target) = locked
@@ -3138,6 +3250,11 @@ impl SessionManager {
 
       let mut changed = false;
       let mut alias_updated = None;
+
+      if target.auth_state != AuthState::Authenticated {
+        target.auth_state = AuthState::Authenticated;
+        changed = true;
+      }
 
       if target.auto_alias {
         if let Some(raw_id) = identity_opt {
@@ -3225,6 +3342,7 @@ impl SessionManager {
 #[cfg(desktop)]
 struct DesktopProbeResult {
   is_auth: bool,
+  logged_out: bool,
   typed: String,
   email: String,
   avatar: String,

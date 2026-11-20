@@ -1,4 +1,5 @@
 export type ProviderId = "muse" | "hark" | "cue";
+export type AuthState = "unknown" | "authenticated" | "logged_out";
 
 export interface AccountKey {
   providerId: ProviderId;
@@ -38,6 +39,7 @@ export interface AccountRecord {
   quotaText: string | null;
   quotaPercent: number | null;
   quotaDetail: QuotaDetail | null;
+  authState: AuthState;
 }
 
 export interface ConflictItem {

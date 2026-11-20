@@ -672,27 +672,41 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
         const switching = isSameKey(switchingKey, acc);
         const active = !switching && isSameKey(state.activeAccount, acc);
         const avatarText = computeAvatarText(acc);
-        const hasDetail = Boolean(acc.quotaDetail);
+        const isLoggedOut = acc.authState === "logged_out";
+        const hasDetail = !isLoggedOut && Boolean(acc.quotaDetail);
 
+        const quotaState = isLoggedOut
+          ? { status: "normal" as QuotaStatus, label: "", extraDepleted: false }
+          : resolveQuotaState(acc);
         const {
           status: alertStatus,
           label: alertLabel,
           extraDepleted,
-        } = resolveQuotaState(acc);
+        } = quotaState;
 
         const isMac = navigator.userAgent.includes("Mac");
         const shortcutHint =
           !isAndroid && idx < 9
             ? `<span class="shortcut-pill" title="快捷切号">${isMac ? "⌘" : "^"}${idx + 1}</span>`
             : "";
-        const alertBadgeHtml =
-          alertStatus !== "normal"
+        const alertBadgeHtml = isLoggedOut
+          ? `<span class="auth-status-badge">未登录</span>`
+          : alertStatus !== "normal"
             ? `<span class="quota-warning-badge ${alertStatus}">${alertLabel}</span>`
             : "";
 
         let compactSubHtml = "";
         if (switching && !hasDetail) {
           compactSubHtml = `<div class="account-sub loading-text"><span class="quota-label-text">正在加载…</span></div>`;
+        } else if (isLoggedOut) {
+          const loginHint = active
+            ? isAndroid
+              ? "登录已失效，点击进入重新登录"
+              : "登录已失效，请在右侧重新登录"
+            : acc.autoAlias
+              ? "尚未登录，点击前往登录"
+              : "登录已失效，点击重新登录";
+          compactSubHtml = `<div class="account-sub auth-logged-out"><span class="auth-dot-inline"></span><span class="quota-label-text">${loginHint}</span></div>`;
         } else if (!hasDetail) {
           const quotaLabel =
             acc.quotaText ?? (acc.autoAlias ? "登录后自动同步额度" : "正在同步额度明细…");
@@ -719,6 +733,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
           hasDetail ? "has-detail" : "",
           active ? "active" : "",
           switching ? "switching" : "",
+          isLoggedOut ? "logged-out" : "",
           alertStatus !== "normal" ? `alert-${alertStatus}` : "",
         ]
           .filter(Boolean)
@@ -739,7 +754,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
               <div class="avatar-wrap">
                 ${avatarNodeHtml}
                 ${switching ? `<span class="avatar-spinner"></span>` : ""}
-                ${active ? `<span class="status-dot"></span>` : ""}
+                ${active ? `<span class="status-dot ${isLoggedOut ? "offline" : ""}"></span>` : ""}
               </div>
               <div class="account-meta">
                 <div class="account-alias-row">
@@ -754,7 +769,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
                 <button class="action-icon-btn danger" data-remove-uuid="${escapeHtml(acc.uuid)}" title="从本机移除" type="button">${ICON_TRASH}</button>
               </div>
             </div>
-            ${acc.quotaDetail ? renderQuotaDetailPanel(acc.quotaDetail, alertStatus, extraDepleted) : ""}
+            ${!isLoggedOut && acc.quotaDetail ? renderQuotaDetailPanel(acc.quotaDetail, alertStatus, extraDepleted) : ""}
           </div>
         `;
       })

@@ -1390,3 +1390,57 @@ body,
   opacity: 0.55;
   cursor: not-allowed;
 }
+
+.account-row.logged-out {
+  border-style: dashed;
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.account-row.logged-out:hover {
+  border-color: #94a3b8;
+  background: #f1f5f9;
+}
+
+.account-row.logged-out.active {
+  border-style: dashed;
+  border-color: #60a5fa;
+  background: linear-gradient(180deg, #f8fbff 0%, #eef5ff 100%);
+}
+
+.account-row.logged-out .avatar {
+  opacity: 0.72;
+  filter: grayscale(0.35);
+}
+
+.status-dot.offline {
+  background: #f59e0b;
+}
+
+.auth-status-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: #fef3c7;
+  color: #b45309;
+  border: 1px solid #fde68a;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.account-sub.auth-logged-out {
+  color: #b45309;
+  font-weight: 500;
+}
+
+.auth-dot-inline {
+  width: 6px;
+  height: 6px;
+  min-width: 6px;
+  border-radius: 999px;
+  background: #f59e0b;
+}
