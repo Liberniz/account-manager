@@ -59,3 +59,29 @@ export interface ManagerSnapshot {
   notice: string | null;
   modalActive: boolean;
 }
+
+export interface UpdateCheckResult {
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  releaseNotes: string;
+  pubDate: string | null;
+  downloadUrl: string | null;
+  sha256: string | null;
+  filename: string | null;
+  size: number | null;
+  releasePageUrl: string;
+}
+
+export interface UpdateProgressEvent {
+  stage: string;
+  downloaded: number;
+  total: number | null;
+  percent: number | null;
+  message: string;
+}
+
+export interface InstallUpdateOutcome {
+  status: string;
+  message: string;
+}

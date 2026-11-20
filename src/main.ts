@@ -4,17 +4,21 @@ import "./styles.css";
 import type {
   AccountKey,
   AccountRecord,
+  InstallUpdateOutcome,
   ManagerSnapshot,
   ProviderId,
   ProviderInfo,
   QuotaDetail,
+  UpdateCheckResult,
+  UpdateProgressEvent,
 } from "./types";
 
 type ModalMode =
   | { kind: "none" }
   | { kind: "add"; providerId: ProviderId; draft: string }
   | { kind: "rename"; account: AccountRecord; draft: string }
-  | { kind: "remove"; account: AccountRecord };
+  | { kind: "remove"; account: AccountRecord }
+  | { kind: "update" };
 
 const PROVIDER_LOGOS: Record<ProviderId, { src: string; fullBleed: boolean }> = {
   muse: { src: "/logos/muse.png", fullBleed: true },
@@ -27,11 +31,31 @@ const ICON_REFRESH = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none
 const ICON_EDIT = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>`;
 const ICON_TRASH = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
 const ICON_USER_PLUS = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>`;
+const ICON_UPDATE = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
 
 let snapshot: ManagerSnapshot | null = null;
 let modal: ModalMode = { kind: "none" };
 let optimisticSwitching: AccountKey | null = null;
 let busy = false;
+let lastRenderedUpdateStage: string | null = null;
+
+const updateState: {
+  checking: boolean;
+  installing: boolean;
+  result: UpdateCheckResult | null;
+  progress: UpdateProgressEvent | null;
+  error: string | null;
+  outcomeStatus: string | null;
+  outcomeMessage: string | null;
+} = {
+  checking: false,
+  installing: false,
+  result: null,
+  progress: null,
+  error: null,
+  outcomeStatus: null,
+  outcomeMessage: null,
+};
 
 const scrollOffsets: Record<ProviderId, number> = {
   muse: 0,
@@ -262,6 +286,101 @@ function restoreScrollPosition(): void {
   }
 }
 
+function rerenderPreservingScroll(): void {
+  saveScrollPosition();
+  render();
+  restoreScrollPosition();
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let idx = 0;
+  let val = bytes;
+  while (val >= 1024 && idx < units.length - 1) {
+    val /= 1024;
+    idx += 1;
+  }
+  return idx === 0 ? `${Math.round(val)} B` : `${val.toFixed(1)} ${units[idx]}`;
+}
+
+function formatProgressSummary(evt: UpdateProgressEvent): string {
+  if (evt.stage === "verifying") return "校验中";
+  if (evt.stage === "installing") return "正在替换";
+  if (evt.stage === "ready") return "完成";
+  if (evt.stage === "needs_permission") return "待授权";
+  const pct = typeof evt.percent === "number" ? `${evt.percent}%` : "";
+  const transferred = evt.total
+    ? `${formatBytes(evt.downloaded)} / ${formatBytes(evt.total)}`
+    : evt.downloaded > 0
+      ? formatBytes(evt.downloaded)
+      : "";
+  if (pct && transferred) return `${pct} · ${transferred}`;
+  return pct || transferred;
+}
+
+async function runCheckForUpdates(silent: boolean): Promise<void> {
+  if (updateState.checking || updateState.installing) return;
+  updateState.checking = true;
+  if (!silent) {
+    updateState.error = null;
+    updateState.outcomeStatus = null;
+    updateState.outcomeMessage = null;
+    if (modal.kind === "update") {
+      rerenderPreservingScroll();
+    }
+  }
+  try {
+    const res = await invoke<UpdateCheckResult>("check_for_updates");
+    updateState.result = res;
+    updateState.error = null;
+  } catch (err) {
+    if (!silent) {
+      updateState.error = String(err);
+    }
+  } finally {
+    updateState.checking = false;
+    if (!silent || updateState.result?.hasUpdate || modal.kind === "update") {
+      rerenderPreservingScroll();
+    }
+  }
+}
+
+async function runDownloadAndInstall(): Promise<void> {
+  const res = updateState.result;
+  if (!res?.downloadUrl || updateState.checking || updateState.installing) return;
+  updateState.installing = true;
+  updateState.error = null;
+  updateState.outcomeStatus = null;
+  updateState.outcomeMessage = null;
+  lastRenderedUpdateStage = "downloading";
+  updateState.progress = {
+    stage: "downloading",
+    downloaded: 0,
+    total: res.size,
+    percent: 0,
+    message: "正在准备下载...",
+  };
+  rerenderPreservingScroll();
+  try {
+    const outcome = await invoke<InstallUpdateOutcome>("download_and_install_update", {
+      request: {
+        version: res.latestVersion,
+        downloadUrl: res.downloadUrl,
+        sha256: res.sha256,
+        filename: res.filename,
+      },
+    });
+    updateState.outcomeStatus = outcome.status;
+    updateState.outcomeMessage = outcome.message;
+  } catch (err) {
+    updateState.error = String(err);
+  } finally {
+    updateState.installing = false;
+    rerenderPreservingScroll();
+  }
+}
+
 async function setModal(next: ModalMode): Promise<void> {
   const wasActive = modal.kind !== "none";
   const isActive = next.kind !== "none";
@@ -326,8 +445,120 @@ function currentProvider(state: ManagerSnapshot): ProviderInfo {
   );
 }
 
+function renderUpdateModal(): string {
+  const res = updateState.result;
+  const curVer = res ? res.currentVersion : "...";
+  const hasUpdate = Boolean(res?.hasUpdate);
+  const title = hasUpdate
+    ? `发现新版本 v${escapeHtml(res!.latestVersion)}`
+    : "检查更新";
+
+  const versionRow = res
+    ? `
+      <div class="update-version-row">
+        <span class="update-version-pill">当前 v${escapeHtml(curVer)}</span>
+        ${
+          hasUpdate
+            ? `<span>→</span><span class="update-version-pill latest">最新 v${escapeHtml(res.latestVersion)}</span>`
+            : ""
+        }
+        ${res.size ? `<span class="update-size-label">${escapeHtml(formatBytes(res.size))}</span>` : ""}
+      </div>
+    `
+    : `<div class="modal-desc">正在连接 GitHub Releases 检查版本信息...</div>`;
+
+  let bodyHtml = "";
+  if (updateState.checking && !res) {
+    bodyHtml = `
+      <div class="update-progress-wrap">
+        <div class="update-progress-track"><div class="update-progress-fill indeterminate"></div></div>
+      </div>
+    `;
+  } else if (res) {
+    const noteText = res.releaseNotes.trim();
+    if (hasUpdate) {
+      bodyHtml += `<div class="update-notes">${escapeHtml(noteText || "包含稳定性改进与问题修复。")}</div>`;
+      if (!res.downloadUrl) {
+        bodyHtml += `<div class="modal-desc">当前发布尚未包含本平台自动安装包，请点击「发布页」手动下载。</div>`;
+      }
+    } else {
+      bodyHtml += `<div class="modal-desc">${escapeHtml(noteText || "当前已是最新版本。")}</div>`;
+    }
+  }
+
+  const prog = updateState.progress;
+  const showProgress =
+    prog &&
+    prog.stage !== "error" &&
+    (updateState.installing ||
+      updateState.outcomeStatus === "restarting" ||
+      prog.stage === "ready");
+  if (showProgress) {
+    lastRenderedUpdateStage = prog.stage;
+    const isIndeterminate = prog.percent === null;
+    const widthStyle = isIndeterminate ? "" : `style="width:${Math.max(0, Math.min(100, prog.percent!))}%"`;
+    bodyHtml += `
+      <div class="update-progress-wrap">
+        <div class="update-progress-meta">
+          <span id="update-progress-text">${escapeHtml(prog.message)}</span>
+          <span id="update-progress-pct" class="update-progress-pct">${escapeHtml(formatProgressSummary(prog))}</span>
+        </div>
+        <div class="update-progress-track">
+          <div id="update-progress-bar" class="update-progress-fill ${isIndeterminate ? "indeterminate" : ""}" ${widthStyle}></div>
+        </div>
+      </div>
+    `;
+  }
+
+  if (updateState.outcomeMessage) {
+    bodyHtml += `<div class="update-outcome-box">${escapeHtml(updateState.outcomeMessage)}</div>`;
+  }
+  if (updateState.error) {
+    bodyHtml += `<div class="update-error-box">${escapeHtml(updateState.error)}</div>`;
+  }
+
+  const canInstall = hasUpdate && Boolean(res?.downloadUrl);
+  const disablePrimary =
+    updateState.checking ||
+    updateState.installing ||
+    updateState.outcomeStatus === "restarting";
+  const primaryBtn = canInstall
+    ? `<button id="update-install-btn" class="btn primary" type="button" ${disablePrimary ? "disabled" : ""}>${
+        updateState.installing
+          ? "更新中..."
+          : updateState.outcomeStatus === "needs_permission"
+            ? "已授权，继续安装"
+            : "立即下载并更新"
+      }</button>`
+    : `<button id="update-recheck-btn" class="btn primary" type="button" ${disablePrimary ? "disabled" : ""}>${
+        updateState.checking ? "检查中..." : "重新检查"
+      }</button>`;
+
+  const pageBtn = res?.releasePageUrl
+    ? `<button id="update-open-page-btn" class="btn" type="button">发布页</button>`
+    : "";
+
+  return `
+    <div class="inline-modal" role="dialog" aria-modal="true">
+      <div class="modal-card">
+        <div class="modal-title">${title}</div>
+        ${versionRow}
+        ${bodyHtml}
+        <div class="modal-footer">
+          <button id="modal-cancel-btn" class="btn" type="button" ${updateState.installing ? "disabled" : ""}>关闭</button>
+          ${pageBtn}
+          ${primaryBtn}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderModal(provider: ProviderInfo): string {
   if (modal.kind === "none") return "";
+  if (modal.kind === "update") {
+    return renderUpdateModal();
+  }
   if (modal.kind === "add") {
     return `
       <div class="inline-modal" role="dialog" aria-modal="true">
@@ -404,13 +635,19 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
     )
     .join("");
 
+  const hasUpdate = Boolean(updateState.result?.hasUpdate);
+  const androidUpdateBtn = isAndroid
+    ? `<button id="check-update-btn" class="ghost-icon-btn update-trigger-btn ${hasUpdate ? "has-update" : ""}" type="button" title="${hasUpdate ? `发现新版本 v${escapeHtml(updateState.result!.latestVersion)}` : "检查更新"}">${ICON_UPDATE}${hasUpdate ? `<span class="update-dot"></span>` : ""}</button>`
+    : "";
+
   const headerBtnHtml = provider.enabled
     ? `
+      ${androidUpdateBtn}
       ${!isAndroid ? `<button id="sync-all-btn" class="ghost-icon-btn" type="button" title="刷新已就绪账号额度">${ICON_REFRESH}</button>` : ""}
       <button id="open-site-btn" class="ghost-icon-btn" type="button" title="在浏览器中打开 ${escapeHtml(provider.shortName)} 官网">${ICON_EXTERNAL}</button>
       <button id="add-account-btn" class="icon-btn primary" type="button">+ 新增</button>
     `
-    : `<button id="open-site-btn" class="icon-btn primary" type="button">打开官网 ${ICON_EXTERNAL}</button>`;
+    : `${androidUpdateBtn}<button id="open-site-btn" class="icon-btn primary" type="button">打开官网 ${ICON_EXTERNAL}</button>`;
 
   let listBody = "";
   if (!provider.enabled) {
@@ -641,6 +878,18 @@ function render(): void {
             `
             )
             .join("")}
+          <div class="rail-footer">
+            <button
+              id="check-update-btn"
+              class="rail-util-btn ${updateState.result?.hasUpdate ? "has-update" : ""}"
+              title="${updateState.result?.hasUpdate ? `发现新版本 v${escapeHtml(updateState.result.latestVersion)}` : "检查更新"}"
+              type="button"
+            >
+              ${ICON_UPDATE}
+              <span class="rail-util-label">更新</span>
+              ${updateState.result?.hasUpdate ? `<span class="update-dot"></span>` : ""}
+            </button>
+          </div>
         </aside>
         <section class="middle-column">
           ${renderMiddleContent(snapshot, provider)}
@@ -689,6 +938,33 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
 
   document.querySelector("#dismiss-notice-btn")?.addEventListener("click", async () => {
     await callCommand("dismiss_notice");
+  });
+
+  document.querySelector("#check-update-btn")?.addEventListener("click", async () => {
+    if (modal.kind !== "none") return;
+    await setModal({ kind: "update" });
+    if (!updateState.result && !updateState.checking && !updateState.installing) {
+      await runCheckForUpdates(false);
+    }
+  });
+
+  document.querySelector("#update-recheck-btn")?.addEventListener("click", async () => {
+    await runCheckForUpdates(false);
+  });
+
+  document.querySelector("#update-install-btn")?.addEventListener("click", async () => {
+    await runDownloadAndInstall();
+  });
+
+  document.querySelector("#update-open-page-btn")?.addEventListener("click", async () => {
+    const pageUrl = updateState.result?.releasePageUrl;
+    if (!pageUrl) return;
+    try {
+      await invoke("open_external_url", { url: pageUrl });
+    } catch (err) {
+      updateState.error = String(err);
+      rerenderPreservingScroll();
+    }
   });
 
   document.querySelectorAll<HTMLElement>("[data-resolve-uuid]").forEach((btn) => {
@@ -767,6 +1043,7 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
   });
 
   document.querySelector("#modal-cancel-btn")?.addEventListener("click", async () => {
+    if (modal.kind === "update" && updateState.installing) return;
     await setModal({ kind: "none" });
   });
 
@@ -809,8 +1086,47 @@ async function bootstrap(): Promise<void> {
     restoreScrollPosition();
   });
 
+  await listen<UpdateProgressEvent>("update-progress", (event) => {
+    const evt = event.payload;
+    updateState.progress = evt;
+    if (evt.stage === "error") {
+      updateState.error = evt.message;
+    }
+    if (modal.kind !== "update") {
+      return;
+    }
+    const barEl = document.querySelector<HTMLElement>("#update-progress-bar");
+    const textEl = document.querySelector<HTMLElement>("#update-progress-text");
+    const pctEl = document.querySelector<HTMLElement>("#update-progress-pct");
+    if (barEl && textEl && pctEl && lastRenderedUpdateStage === evt.stage && evt.stage !== "error") {
+      textEl.textContent = evt.message;
+      pctEl.textContent = formatProgressSummary(evt);
+      if (evt.percent === null) {
+        barEl.classList.add("indeterminate");
+        barEl.style.width = "";
+      } else {
+        barEl.classList.remove("indeterminate");
+        barEl.style.width = `${Math.max(0, Math.min(100, evt.percent))}%`;
+      }
+      return;
+    }
+    lastRenderedUpdateStage = evt.stage;
+    rerenderPreservingScroll();
+  });
+
   window.addEventListener("keydown", async (ev) => {
-    if (modal.kind !== "none") return;
+    if (modal.kind !== "none") {
+      if (
+        ev.key === "Escape" &&
+        modal.kind !== "add" &&
+        modal.kind !== "rename" &&
+        !(modal.kind === "update" && updateState.installing)
+      ) {
+        ev.preventDefault();
+        await setModal({ kind: "none" });
+      }
+      return;
+    }
     const target = ev.target as HTMLElement | null;
     if (
       target &&
@@ -878,6 +1194,9 @@ async function bootstrap(): Promise<void> {
 
   snapshot = await invoke<ManagerSnapshot>("get_manager_state");
   render();
+  setTimeout(() => {
+    void runCheckForUpdates(true);
+  }, 3500);
 }
 
 void bootstrap();

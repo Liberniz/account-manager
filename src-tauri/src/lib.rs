@@ -2,10 +2,12 @@ mod platform;
 mod providers;
 mod session_manager;
 mod storage;
+mod updater;
 
 use session_manager::{ManagerSnapshot, SessionManager, APP_TITLE};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
+use updater::{InstallUpdateOutcome, InstallUpdateRequest, UpdateCheckResult};
 
 #[tauri::command]
 async fn get_manager_state(mgr: State<'_, Arc<SessionManager>>) -> Result<ManagerSnapshot, String> {
@@ -103,6 +105,24 @@ async fn trigger_quota_sync(
   Ok(mgr.get_snapshot().await)
 }
 
+#[tauri::command]
+async fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, String> {
+  updater::check_for_updates(&app).await
+}
+
+#[tauri::command]
+async fn download_and_install_update(
+  app: AppHandle,
+  request: InstallUpdateRequest,
+) -> Result<InstallUpdateOutcome, String> {
+  updater::download_and_install_update(&app, request).await
+}
+
+#[tauri::command]
+async fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
+  updater::open_external_url(&app, &url).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   let builder = tauri::Builder::default();
@@ -190,6 +210,9 @@ pub fn run() {
       resolve_uuid_conflict,
       dismiss_notice,
       trigger_quota_sync,
+      check_for_updates,
+      download_and_install_update,
+      open_external_url,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

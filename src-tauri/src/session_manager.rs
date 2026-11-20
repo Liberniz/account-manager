@@ -2751,6 +2751,24 @@ impl SessionManager {
           self.emit_snapshot(app, &snap);
         }
       }
+      AndroidSessionEvent::UpdateProgress {
+        stage,
+        downloaded,
+        total,
+        percent,
+        message,
+      } => {
+        let _ = app.emit(
+          "update-progress",
+          crate::updater::UpdateProgressEvent {
+            stage,
+            downloaded,
+            total,
+            percent,
+            message,
+          },
+        );
+      }
     }
   }
 

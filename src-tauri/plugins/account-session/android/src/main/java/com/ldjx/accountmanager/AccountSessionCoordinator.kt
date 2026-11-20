@@ -251,4 +251,23 @@ object AccountSessionCoordinator {
         }
         ch.send(obj)
     }
+
+    fun emitUpdateProgress(
+        stage: String,
+        downloaded: Long,
+        total: Long?,
+        percent: Int?,
+        message: String,
+    ) {
+        val ch = synchronized(lock) { eventChannel } ?: return
+        val obj = JSObject().apply {
+            put("kind", "updateProgress")
+            put("stage", stage)
+            put("downloaded", downloaded)
+            if (total != null) put("total", total)
+            if (percent != null) put("percent", percent)
+            put("message", message)
+        }
+        ch.send(obj)
+    }
 }

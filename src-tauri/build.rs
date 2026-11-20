@@ -10,6 +10,9 @@ const APP_COMMANDS: &[&str] = &[
   "resolve_uuid_conflict",
   "dismiss_notice",
   "trigger_quota_sync",
+  "check_for_updates",
+  "download_and_install_update",
+  "open_external_url",
 ];
 
 fn main() {

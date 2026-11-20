@@ -17,6 +17,9 @@
     "allow-open-official-site",
     "allow-resolve-uuid-conflict",
     "allow-dismiss-notice",
-    "allow-trigger-quota-sync"
+    "allow-trigger-quota-sync",
+    "allow-check-for-updates",
+    "allow-download-and-install-update",
+    "allow-open-external-url"
   ]
 }

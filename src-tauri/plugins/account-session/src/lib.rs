@@ -83,6 +83,32 @@ pub enum AndroidSessionEvent {
   RecreateRequested {
     previous_switch_seq: u64,
   },
+  #[serde(rename_all = "camelCase")]
+  UpdateProgress {
+    stage: String,
+    downloaded: u64,
+    #[serde(default)]
+    total: Option<u64>,
+    #[serde(default)]
+    percent: Option<u8>,
+    message: String,
+  },
+}
+
+#[cfg(target_os = "android")]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidFetchTextResponse {
+  pub status: u16,
+  pub body: String,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidInstallApkResponse {
+  pub status: String,
+  pub message: String,
 }
 
 #[cfg(target_os = "android")]
@@ -195,5 +221,51 @@ pub async fn open_external_url(app: &AppHandle, url: &str) -> Result<(), String>
     )
     .await
     .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "android")]
+pub async fn fetch_text(
+  app: &AppHandle,
+  url: &str,
+  user_agent: &str,
+  accept: Option<&str>,
+) -> Result<AndroidFetchTextResponse, String> {
+  let bridge = app.state::<AndroidSessionBridge<tauri::Wry>>();
+  bridge
+    .0
+    .run_mobile_plugin_async(
+      "fetchText",
+      serde_json::json!({
+        "url": url,
+        "userAgent": user_agent,
+        "accept": accept,
+      }),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "android")]
+pub async fn download_and_install_apk(
+  app: &AppHandle,
+  url: &str,
+  sha256: Option<&str>,
+  filename: &str,
+  user_agent: &str,
+) -> Result<AndroidInstallApkResponse, String> {
+  let bridge = app.state::<AndroidSessionBridge<tauri::Wry>>();
+  bridge
+    .0
+    .run_mobile_plugin_async(
+      "downloadAndInstallApk",
+      serde_json::json!({
+        "url": url,
+        "sha256": sha256,
+        "filename": filename,
+        "userAgent": user_agent,
+      }),
+    )
+    .await
     .map_err(|e| e.to_string())
 }
