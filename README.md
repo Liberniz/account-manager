@@ -1,5 +1,7 @@
 # 叠号（Multi-Agent Account Manager）
 
+[![LINUX DO](https://img.shields.io/badge/Community-LINUX%20DO-0064e0?style=flat-square)](https://linux.do/)
+
 基于 Tauri 2 构建的跨平台（macOS / Windows / Android）AI 助手多账号隔离与快速切换工具，安装后应用名称为 **叠号**。
 
 ## 支持服务与核心特性
@@ -12,6 +14,33 @@
 - **原生级多账号隔离**：macOS 使用独立 UUID `WKWebsiteDataStore`，Windows 使用独立 WebView2 `UserDataFolder`，Android 使用独立 WebView `MULTI_PROFILE`。
 - **桌面端快捷切号**：支持 `⌘1~9` / `Ctrl+1~9` 以及 `⌘↑`/`⌘↓`/`⌘[`/`⌘]`（Windows 为 `Ctrl`）快速切换账号。
 - **应用内检查更新**：支持在客户端内检查 GitHub Releases 最新版本、带进度条下载、`SHA-256` 校验及覆盖更新。
+
+---
+
+## 界面预览
+
+### macOS
+
+<p align="center">
+  <img src="docs/screenshots/macos-muse.png" alt="macOS Muse 多账号管理与额度同步" width="49%" />
+  <img src="docs/screenshots/macos-hark.png" alt="macOS Hark 账号与双上限额度" width="49%" />
+</p>
+
+### Windows
+
+<p align="center">
+  <img src="docs/screenshots/windows-muse.png" alt="Windows Muse 多账号管理与额度同步" width="49%" />
+  <img src="docs/screenshots/windows-hark.png" alt="Windows Hark 账号与双上限额度" width="49%" />
+</p>
+
+### Android
+
+<p align="center">
+  <img src="docs/screenshots/android-muse-accounts.png" alt="Android Muse 多账号与额度" width="210" />
+  <img src="docs/screenshots/android-hark-accounts.png" alt="Android Hark 账号与双上限额度" width="210" />
+  <img src="docs/screenshots/android-muse-chat.png" alt="Android 独立会话隔离界面" width="210" />
+  <img src="docs/screenshots/android-update-modal.png" alt="Android 应用内检查更新" width="210" />
+</p>
 
 ---
 
@@ -96,3 +125,9 @@ npm ci
 npm run tauri -- dev
 npm run tauri -- build
 ```
+
+---
+
+## 社区
+
+本项目已加入并致谢 [LINUX DO](https://linux.do/) 开源社区。
