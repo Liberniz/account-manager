@@ -33,6 +33,13 @@ const LOGIN_CAPTURE_INIT_JS: &str = r#"(() => {
     const initHost = (location.hostname || '').toLowerCase();
     const isPrimaryHost = initHost === 'muse.ai' || initHost.endsWith('.muse.ai') || initHost === 'app.hark.com' || initHost.endsWith('.hark.com');
     const origFetch = window.fetch;
+    if (initHost === 'app.hark.com' || initHost.endsWith('.hark.com')) {
+      try {
+        if (document.documentElement && !document.documentElement.style.backgroundColor) {
+          document.documentElement.style.backgroundColor = '#171d2f';
+        }
+      } catch (_) {}
+    }
     const setQuota = (text, pct) => {
       if (!text) return;
       const cleanPct = typeof pct === 'number' && Number.isFinite(pct)
@@ -527,12 +534,57 @@ const DOM_PAINT_READY_JS: &str = r#"(() => {
     if (document.readyState === 'loading') return false;
     const body = document.body;
     if (!body) return false;
+    const host = (location.hostname || '').toLowerCase();
+    const isHark = host === 'app.hark.com' || host.endsWith('.hark.com');
+    const isVisibleEl = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width < 16 || r.height < 16) return false;
+      try {
+        const st = getComputedStyle(el);
+        if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+      } catch (_) {}
+      return true;
+    };
+    if (isHark) {
+      if (document.readyState !== 'complete') return false;
+      const sheets = document.querySelectorAll('link[rel~="stylesheet"]');
+      for (const l of sheets) {
+        if (l.sheet === null) return false;
+      }
+      const root = document.getElementById('root');
+      const rootText = root ? (root.innerText || '').trim() : '';
+      if (rootText.length < 4 && (body.innerText || '').trim() === 'Unauthorized') {
+        return false;
+      }
+      if (root) {
+        let rootReady = rootText.length >= 2;
+        if (!rootReady) {
+          const uiEls = root.querySelectorAll('input, button, textarea, [contenteditable="true"], svg, img');
+          for (let i = 0; i < uiEls.length && i < 30; i++) {
+            if (isVisibleEl(uiEls[i])) {
+              rootReady = true;
+              break;
+            }
+          }
+        }
+        if (!rootReady) return false;
+      }
+      if (window.__harkSky && !window.__harkSky.painted) {
+        const gl = document.getElementById('gl');
+        if (gl) {
+          try {
+            if (getComputedStyle(gl).visibility === 'hidden') return false;
+          } catch (_) {}
+        }
+      }
+      return true;
+    }
     const textLen = (body.innerText || '').trim().length;
     if (textLen >= 4) return true;
     const els = body.querySelectorAll('input, button, svg, img, canvas, textarea, [role="button"]');
     for (let i = 0; i < els.length && i < 40; i++) {
-      const r = els[i].getBoundingClientRect();
-      if (r.width >= 16 && r.height >= 16) return true;
+      if (isVisibleEl(els[i])) return true;
     }
     return false;
   } catch (_) {
@@ -2128,7 +2180,29 @@ impl SessionManager {
       builder = builder.data_directory(profile_dir.to_path_buf());
     }
 
+    if provider_id == ProviderId::Hark {
+      builder = builder.background_color(tauri::webview::Color(23, 29, 47, 255));
+    }
+
     builder
+  }
+
+  #[cfg(desktop)]
+  fn initial_hidden_child_rect(
+    main_win: &tauri::Window,
+  ) -> (tauri::LogicalPosition<f64>, tauri::LogicalSize<f64>) {
+    let (win_w, win_h) = match (main_win.inner_size(), main_win.scale_factor()) {
+      (Ok(phys), Ok(scale)) if scale > 0.0 => {
+        ((phys.width as f64) / scale, (phys.height as f64) / scale)
+      }
+      _ => (1280.0, 800.0),
+    };
+    let left_w = win_w.min(LEFT_PANE_WIDTH);
+    let right_w = (win_w - left_w).max(600.0);
+    (
+      tauri::LogicalPosition::new(win_w.max(2000.0) + 1000.0, 0.0),
+      tauri::LogicalSize::new(right_w, win_h.max(400.0)),
+    )
   }
 
   #[cfg(desktop)]
@@ -2209,11 +2283,8 @@ impl SessionManager {
       Arc::clone(&alive_flag),
     );
 
-    let created_wv = match main_win.add_child(
-      builder,
-      tauri::LogicalPosition::new(0.0, 0.0),
-      tauri::LogicalSize::new(900.0, 720.0),
-    ) {
+    let (init_pos, init_size) = Self::initial_hidden_child_rect(&main_win);
+    let created_wv = match main_win.add_child(builder, init_pos, init_size) {
       Ok(wv) => wv,
       Err(err) => {
         alive_flag.store(false, Ordering::SeqCst);
@@ -2424,7 +2495,7 @@ impl SessionManager {
       let is_foreground_waiting = locked
         .active_slot
         .as_ref()
-        .map(|s| s.account_key == key && s.view_instance_id == view_instance_id)
+        .map(|s| s.account_key == key && s.view_instance_id == view_instance_id && !s.committed)
         .unwrap_or(false);
 
       if is_foreground_waiting {
@@ -2546,12 +2617,9 @@ impl SessionManager {
 
     let sync_res = (|| {
       let main_win = app.get_window("main").ok_or_else(|| "主窗口不存在".to_string())?;
+      let (init_pos, init_size) = Self::initial_hidden_child_rect(&main_win);
       let created_wv = main_win
-        .add_child(
-          builder,
-          tauri::LogicalPosition::new(0.0, 0.0),
-          tauri::LogicalSize::new(900.0, 720.0),
-        )
+        .add_child(builder, init_pos, init_size)
         .map_err(|err| format!("创建预热视图失败: {err}"))?;
       let _ = created_wv.hide();
       Ok(platform::verify_desktop_profile_binding(
