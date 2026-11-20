@@ -86,8 +86,11 @@ class AccountWebActivity : AppCompatActivity() {
             (() => {
               try {
                 if (location.protocol !== 'https:') return;
+                if (window !== window.top) return;
                 if (window.__maamNetHooked) return;
                 window.__maamNetHooked = true;
+                const initHost = (location.hostname || '').toLowerCase();
+                const isPrimaryHost = initHost === 'muse.ai' || initHost.endsWith('.muse.ai') || initHost === 'app.hark.com' || initHost.endsWith('.hark.com');
                 const setQuota = (text, pct) => {
                   if (!text) return;
                   const cleanPct = typeof pct === 'number' && Number.isFinite(pct)
@@ -271,34 +274,36 @@ class AccountWebActivity : AppCompatActivity() {
                     }
                   }
                 };
-                const origFetch = window.fetch;
-                if (typeof origFetch === 'function') {
-                  window.__maamOrigFetch = origFetch;
-                  window.fetch = function(...args) {
-                    const p = origFetch.apply(this, args);
-                    p.then((res) => {
-                      try {
-                        const ct = (res.headers && res.headers.get('content-type')) || '';
-                        if (ct.includes('json') || ct.includes('text')) {
-                          res.clone().text().then(inspectText).catch(() => {});
-                        }
-                      } catch (_) {}
-                    }).catch(() => {});
-                    return p;
-                  };
-                }
-                const OrigWS = window.WebSocket;
-                if (typeof OrigWS === 'function') {
-                  const WrappedWS = function(...args) {
-                    const ws = new OrigWS(...args);
-                    ws.addEventListener('message', (ev) => {
-                      if (typeof ev.data === 'string') inspectText(ev.data);
-                    });
-                    return ws;
-                  };
-                  WrappedWS.prototype = OrigWS.prototype;
-                  Object.assign(WrappedWS, OrigWS);
-                  window.WebSocket = WrappedWS;
+                if (isPrimaryHost) {
+                  const origFetch = window.fetch;
+                  if (typeof origFetch === 'function') {
+                    window.__maamOrigFetch = origFetch;
+                    window.fetch = function(...args) {
+                      const p = origFetch.apply(this, args);
+                      p.then((res) => {
+                        try {
+                          const ct = (res.headers && res.headers.get('content-type')) || '';
+                          if (ct.includes('json') || ct.includes('text')) {
+                            res.clone().text().then(inspectText).catch(() => {});
+                          }
+                        } catch (_) {}
+                      }).catch(() => {});
+                      return p;
+                    };
+                  }
+                  const OrigWS = window.WebSocket;
+                  if (typeof OrigWS === 'function') {
+                    const WrappedWS = function(...args) {
+                      const ws = new OrigWS(...args);
+                      ws.addEventListener('message', (ev) => {
+                        if (typeof ev.data === 'string') inspectText(ev.data);
+                      });
+                      return ws;
+                    };
+                    WrappedWS.prototype = OrigWS.prototype;
+                    Object.assign(WrappedWS, OrigWS);
+                    window.WebSocket = WrappedWS;
+                  }
                 }
               } catch (_) {}
             })();

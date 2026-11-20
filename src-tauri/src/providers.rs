@@ -116,8 +116,36 @@ fn host_matches(host: &str, domain: &str) -> bool {
   host.to_ascii_lowercase().ends_with(&suffix)
 }
 
+const EMBEDDED_WIDGET_HOSTS: &[&str] = &[
+  "challenges.cloudflare.com",
+  "turnstile.cloudflare.com",
+  "hcaptcha.com",
+  "recaptcha.net",
+  "gstatic.com",
+  "arkoselabs.com",
+  "funcaptcha.com",
+  "friendlycaptcha.com",
+  "geetest.com",
+  "captcha-delivery.com",
+  "firebaseapp.com",
+  "stripe.com",
+  "stripecdn.com",
+];
+
+fn is_embedded_widget_url(url: &Url, host: &str) -> bool {
+  if EMBEDDED_WIDGET_HOSTS.iter().any(|allowed| host_matches(host, allowed)) {
+    return true;
+  }
+  (host.eq_ignore_ascii_case("www.google.com") || host.eq_ignore_ascii_case("google.com"))
+    && url.path().starts_with("/recaptcha")
+}
+
 pub fn classify_top_level_url(provider_id: ProviderId, url: &Url, allow_blank: bool) -> NavigationDecision {
-  if allow_blank && url.as_str() == "about:blank" {
+  let raw = url.as_str();
+  if raw == "about:srcdoc" || raw.starts_with("blob:https://") {
+    return NavigationDecision::AllowBlank;
+  }
+  if allow_blank && raw == "about:blank" {
     return NavigationDecision::AllowBlank;
   }
   if url.scheme() != "https" {
@@ -130,7 +158,9 @@ pub fn classify_top_level_url(provider_id: ProviderId, url: &Url, allow_blank: b
     return NavigationDecision::ExternalGoogleOAuth;
   }
   let spec = get_provider(provider_id);
-  if spec.allowed_hosts.iter().any(|allowed| host_matches(host, allowed)) {
+  if spec.allowed_hosts.iter().any(|allowed| host_matches(host, allowed))
+    || is_embedded_widget_url(url, host)
+  {
     NavigationDecision::AllowHttps
   } else {
     NavigationDecision::Deny

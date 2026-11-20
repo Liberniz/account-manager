@@ -29,6 +29,9 @@ const MAX_WARM_DESKTOP_VIEWS: usize = 6;
 const LOGIN_CAPTURE_INIT_JS: &str = r#"(() => {
   try {
     if (location.protocol !== 'https:') return;
+    if (window !== window.top) return;
+    const initHost = (location.hostname || '').toLowerCase();
+    const isPrimaryHost = initHost === 'muse.ai' || initHost.endsWith('.muse.ai') || initHost === 'app.hark.com' || initHost.endsWith('.hark.com');
     const setQuota = (text, pct) => {
       if (!text) return;
       const cleanPct = typeof pct === 'number' && Number.isFinite(pct)
@@ -354,42 +357,44 @@ const LOGIN_CAPTURE_INIT_JS: &str = r#"(() => {
         }
       }
     };
-    const origFetch = window.fetch;
-    if (typeof origFetch === 'function') {
-      window.fetch = function(...args) {
-        const reqUrl = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
-        const p = origFetch.apply(this, args);
-        p.then((res) => {
-          try {
-            const ct = (res.headers && res.headers.get('content-type')) || '';
-            if (ct.includes('json') || ct.includes('text')) {
-              res.clone().text().then(inspectText).catch(() => {});
-            }
-            if (reqUrl.includes('/api/chat')) {
-              clearTimeout(window.__maamPostChatTimer);
-              window.__maamPostChatTimer = setTimeout(() => {
-                if (typeof window.__maamRefreshBackendQuota === 'function') {
-                  window.__maamRefreshBackendQuota(true);
-                }
-              }, 8000);
-            }
-          } catch (_) {}
-        }).catch(() => {});
-        return p;
-      };
-    }
-    const OrigWS = window.WebSocket;
-    if (typeof OrigWS === 'function') {
-      const WrappedWS = function(...args) {
-        const ws = new OrigWS(...args);
-        ws.addEventListener('message', (ev) => {
-          if (typeof ev.data === 'string') inspectText(ev.data);
-        });
-        return ws;
-      };
-      WrappedWS.prototype = OrigWS.prototype;
-      Object.assign(WrappedWS, OrigWS);
-      window.WebSocket = WrappedWS;
+    if (isPrimaryHost) {
+      const origFetch = window.fetch;
+      if (typeof origFetch === 'function') {
+        window.fetch = function(...args) {
+          const reqUrl = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+          const p = origFetch.apply(this, args);
+          p.then((res) => {
+            try {
+              const ct = (res.headers && res.headers.get('content-type')) || '';
+              if (ct.includes('json') || ct.includes('text')) {
+                res.clone().text().then(inspectText).catch(() => {});
+              }
+              if (reqUrl.includes('/api/chat')) {
+                clearTimeout(window.__maamPostChatTimer);
+                window.__maamPostChatTimer = setTimeout(() => {
+                  if (typeof window.__maamRefreshBackendQuota === 'function') {
+                    window.__maamRefreshBackendQuota(true);
+                  }
+                }, 8000);
+              }
+            } catch (_) {}
+          }).catch(() => {});
+          return p;
+        };
+      }
+      const OrigWS = window.WebSocket;
+      if (typeof OrigWS === 'function') {
+        const WrappedWS = function(...args) {
+          const ws = new OrigWS(...args);
+          ws.addEventListener('message', (ev) => {
+            if (typeof ev.data === 'string') inspectText(ev.data);
+          });
+          return ws;
+        };
+        WrappedWS.prototype = OrigWS.prototype;
+        Object.assign(WrappedWS, OrigWS);
+        window.WebSocket = WrappedWS;
+      }
     }
     const capture = (el) => {
       if (!el || typeof el.value !== 'string') return;
@@ -1838,10 +1843,7 @@ impl SessionManager {
       let can_blank = allow_blank_nav.load(Ordering::SeqCst);
       match classify_top_level_url(provider_id, url, can_blank) {
         NavigationDecision::AllowBlank => true,
-        NavigationDecision::AllowHttps => {
-          allow_blank_nav.store(false, Ordering::SeqCst);
-          true
-        }
+        NavigationDecision::AllowHttps => true,
         NavigationDecision::ExternalGoogleOAuth => {
           let mgr_ext = Arc::clone(&mgr_for_nav);
           let app_ext = app_for_nav.clone();
