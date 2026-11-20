@@ -23,7 +23,6 @@ type ModalMode =
 const PROVIDER_LOGOS: Record<ProviderId, { src: string; fullBleed: boolean }> = {
   muse: { src: "/logos/muse.png", fullBleed: true },
   hark: { src: "/logos/hark.svg", fullBleed: false },
-  cue: { src: "/logos/cue.svg", fullBleed: false },
 };
 
 const ICON_EXTERNAL = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`;
@@ -60,7 +59,6 @@ const updateState: {
 const scrollOffsets: Record<ProviderId, number> = {
   muse: 0,
   hark: 0,
-  cue: 0,
 };
 
 function isSameKey(a: AccountKey | null, b: AccountRecord): boolean {

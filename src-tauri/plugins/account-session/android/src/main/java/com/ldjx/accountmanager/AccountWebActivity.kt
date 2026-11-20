@@ -107,12 +107,14 @@ class AccountWebActivity : AppCompatActivity() {
                   setQuota(detail.planValue || detail.planLabel, rem);
                 };
                 const mapHarkSub = (node) => {
+                  if (!(location.hostname || '').toLowerCase().endsWith('hark.com')) return null;
                   if (!node || typeof node !== 'object') return null;
                   const u = node.usage || node.billing || node.credits || node.subscription || node;
-                  const rem = u.remaining ?? u.remaining_credits ?? u.credits_remaining ?? u.balance ?? u.left;
-                  const tot = u.total ?? u.limit ?? u.total_credits ?? u.max ?? u.allowance;
-                  const used = u.used ?? u.used_credits ?? u.consumed;
-                  const planName = u.plan_name || u.plan || node.plan_name || node.plan || (typeof node.tier === 'string' ? node.tier : null) || (typeof u.name === 'string' ? u.name : null) || 'Hark 额度';
+                  if (!u || typeof u !== 'object' || 'page' in u || 'items' in u || 'messages' in u) return null;
+                  const rem = u.remaining ?? u.remaining_credits ?? u.remainingCredits ?? u.credits_remaining ?? u.creditsRemaining ?? u.balance ?? u.creditBalance ?? u.left;
+                  const tot = u.total ?? u.limit ?? u.total_credits ?? u.totalCredits ?? u.max ?? u.allowance;
+                  const used = u.used ?? u.used_credits ?? u.usedCredits ?? u.consumed;
+                  const planName = u.plan_name || u.planName || u.plan || node.plan_name || node.planName || node.plan || (typeof node.tier === 'string' ? node.tier : null) || (typeof u.name === 'string' ? u.name : null) || 'Hark 额度';
                   if (typeof rem === 'number' || typeof used === 'number') {
                     let usedPct = null;
                     let planVal = '';
@@ -123,10 +125,11 @@ class AccountWebActivity : AppCompatActivity() {
                     } else if (typeof rem === 'number') {
                       planVal = '剩余 ' + rem;
                     }
+                    const resetsAt = u.resets_at ?? u.resetsAt;
                     return {
                       planLabel: String(planName),
                       planValue: planVal,
-                      planSubtext: u.resets_at ? ('将在 ' + new Date(u.resets_at).toLocaleDateString() + ' 重置') : (u.period ? ('周期: ' + u.period) : null),
+                      planSubtext: resetsAt ? ('将在 ' + new Date(resetsAt).toLocaleDateString() + ' 重置') : (u.period ? ('周期: ' + u.period) : null),
                       planUsedPercent: usedPct,
                       extraLabel: null,
                       extraValue: null,
@@ -343,7 +346,7 @@ class AccountWebActivity : AppCompatActivity() {
                 if (document.readyState !== 'complete') {
                   return makeLoading();
                 }
-                const loginInputs = document.querySelectorAll('input[type="email"], input[type="password"], input[placeholder*="邮箱"], input[placeholder*="手机"], input[placeholder*="email" i], input[placeholder*="phone" i]');
+                const loginInputs = document.querySelectorAll('input[type="email"], input[type="password"], input[autocomplete="one-time-code"], input[placeholder*="邮箱"], input[placeholder*="手机"], input[placeholder*="email" i], input[placeholder*="phone" i]');
                 const hasVisibleLoginInput = () => {
                   for (const inp of loginInputs) {
                     if (inp.disabled || inp.readOnly) continue;
@@ -352,6 +355,11 @@ class AccountWebActivity : AppCompatActivity() {
                   }
                   return false;
                 };
+                const hasChatComposer = Array.from(document.querySelectorAll('textarea, [contenteditable="true"]')).some((el) => {
+                  if (el.disabled || el.readOnly) return false;
+                  const r = el.getBoundingClientRect();
+                  return r.width > 120 && r.height > 20;
+                });
                 if (isExternalLoginHost) {
                   if (/^\/(login|signin|signup|auth)\b/.test(path) || hasVisibleLoginInput()) {
                     return makeLoggedOut();
@@ -364,11 +372,11 @@ class AccountWebActivity : AppCompatActivity() {
                 if (/^\/(login|signin|signup|auth)\b/.test(path)) {
                   return makeLoggedOut();
                 }
-                if (!/^\/(settings|profile|account)\b/.test(path) && hasVisibleLoginInput()) {
+                if (!hasChatComposer && !/^\/(settings|profile|account)\b/.test(path) && hasVisibleLoginInput()) {
                   return makeLoggedOut();
                 }
                 const bodyText = (document.body && document.body.innerText) || '';
-                if (/登录或创建账户|Log in or sign up|Sign in to|登录以继续/i.test(bodyText)) {
+                if (!hasChatComposer && /登录或创建账户|Log in or sign up|Sign in to|登录以继续|通过 Google 继续|Continue with Google|通过 Apple 继续|Continue with Apple/i.test(bodyText)) {
                   return makeLoggedOut();
                 }
                 const bad = /^(support|privacy|help|legal|press|noreply|no-reply|info|security|contact|abuse|feedback|sales|terms)@/i;
@@ -500,6 +508,32 @@ class AccountWebActivity : AppCompatActivity() {
                     const cached = localStorage.getItem('__maam_cached_quota_detail_v2__');
                     if (cached) dObj = JSON.parse(cached);
                   } catch (_) {}
+                }
+                if ((!dObj || !dObj.planLabel) && host.endsWith('hark.com')) {
+                  const creditEls = document.querySelectorAll('[class*="credit" i], [class*="usage" i], [data-testid*="credit"], [data-testid*="usage"]');
+                  for (const el of creditEls) {
+                    const txt = (el.innerText || '').trim();
+                    const m = txt.match(/(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)/);
+                    if (m) {
+                      const cur = parseFloat(m[1]);
+                      const max = parseFloat(m[2]);
+                      if (max > 0) {
+                        const pct = Math.max(0, Math.min(100, Math.round((cur / max) * 100)));
+                        dObj = {
+                          planLabel: 'Hark 用量',
+                          planValue: '已使用 ' + pct + '%',
+                          planSubtext: '当前 ' + cur + ' / ' + max,
+                          planUsedPercent: pct,
+                          extraLabel: null,
+                          extraValue: null,
+                          extraSubtext: null,
+                          extraUsedPercent: null
+                        };
+                        if (typeof window.__maamSaveDetail === 'function') window.__maamSaveDetail(dObj);
+                        break;
+                      }
+                    }
+                  }
                 }
                 if (dObj && dObj.planLabel) {
                   window.__maamQuotaDetail = dObj;

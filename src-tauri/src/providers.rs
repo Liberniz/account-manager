@@ -6,7 +6,6 @@ use url::Url;
 pub enum ProviderId {
   Muse,
   Hark,
-  Cue,
 }
 
 impl ProviderId {
@@ -14,7 +13,6 @@ impl ProviderId {
     match self {
       ProviderId::Muse => "muse",
       ProviderId::Hark => "hark",
-      ProviderId::Cue => "cue",
     }
   }
 
@@ -22,7 +20,6 @@ impl ProviderId {
     match value.trim().to_ascii_lowercase().as_str() {
       "muse" => Some(ProviderId::Muse),
       "hark" => Some(ProviderId::Hark),
-      "cue" => Some(ProviderId::Cue),
       _ => None,
     }
   }
@@ -68,6 +65,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
       "instagram.com",
       "fb.com",
       "appleid.apple.com",
+      "idmsa.apple.com",
     ],
   },
   ProviderSpec {
@@ -82,21 +80,12 @@ pub const PROVIDERS: &[ProviderSpec] = &[
       callback_origins: &["https://app.hark.com", "https://hark.com"],
       verified_methods: &["email", "phone", "apple"],
     },
-    allowed_hosts: &["app.hark.com", "hark.com", "appleid.apple.com"],
-  },
-  ProviderSpec {
-    info: ProviderInfo {
-      id: ProviderId::Cue,
-      name: "Cue · Manus",
-      short_name: "Cue",
-      enabled: false,
-      status_text: "待接入",
-      entry_url: "https://cue.im/",
-      homepage_url: "https://cue.im/",
-      callback_origins: &[],
-      verified_methods: &[],
-    },
-    allowed_hosts: &["cue.im", "manus.im"],
+    allowed_hosts: &[
+      "app.hark.com",
+      "hark.com",
+      "appleid.apple.com",
+      "idmsa.apple.com",
+    ],
   },
 ];
 

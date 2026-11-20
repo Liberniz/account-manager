@@ -8,7 +8,6 @@
 | --- | --- | --- |
 | **Muse · Meta** | 已启用 | 独立会话隔离、邮箱识别、额度明细同步 |
 | **Hark** | 已启用 | 独立会话隔离、额度与余额同步 |
-| **Cue · Manus** | 待接入 | 暂仅支持跳转官网 |
 
 - **原生级多账号隔离**：macOS 使用独立 UUID `WKWebsiteDataStore`，Windows 使用独立 WebView2 `UserDataFolder`，Android 使用独立 WebView `MULTI_PROFILE`。
 - **桌面端快捷切号**：支持 `⌘1~9` / `Ctrl+1~9` 以及 `⌘↑`/`⌘↓`/`⌘[`/`⌘]`（Windows 为 `Ctrl`）快速切换账号。

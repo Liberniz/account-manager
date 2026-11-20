@@ -581,11 +581,6 @@ body,
   color: #4338ca;
 }
 
-.avatar.cue {
-  background: #e0f2fe;
-  color: #0284c7;
-}
-
 .avatar.pending-identity {
   background: #f1f5f9;
   color: #64748b;

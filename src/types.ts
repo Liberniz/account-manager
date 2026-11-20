@@ -1,4 +1,4 @@
-export type ProviderId = "muse" | "hark" | "cue";
+export type ProviderId = "muse" | "hark";
 export type AuthState = "unknown" | "authenticated" | "logged_out";
 
 export interface AccountKey {
