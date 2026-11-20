@@ -128,6 +128,8 @@ npm run tauri -- build
 
 ---
 
-## 社区
+## 社区与开源协议
 
 本项目已加入并致谢 [LINUX DO](https://linux.do/) 开源社区。
+
+本项目基于 [Apache-2.0](LICENSE) 协议开源。
