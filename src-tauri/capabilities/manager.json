@@ -17,6 +17,7 @@
     "allow-open-official-site",
     "allow-resolve-uuid-conflict",
     "allow-dismiss-notice",
+    "allow-set-proxy-url",
     "allow-trigger-quota-sync",
     "allow-check-for-updates",
     "allow-download-and-install-update",

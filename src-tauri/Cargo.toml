@@ -1,6 +1,6 @@
 [package]
 name = "multi-agent-account-manager"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 rust-version = "1.85"
 
@@ -27,6 +27,8 @@ reqwest = { version = "0.13", default-features = false, features = ["native-tls"
 sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "=2.12.6", features = ["macos-proxy"] }
+reqwest = { version = "0.13", default-features = false, features = ["socks"] }
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSUUID", "NSString", "NSError", "block2"] }

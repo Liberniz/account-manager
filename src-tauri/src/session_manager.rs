@@ -7,6 +7,8 @@ use crate::storage::{
   detect_conflicts, load_or_migrate_store, normalize_uuid, now_ms, save_store_atomic, AccountKey,
   AccountRecord, AccountsStoreFile, AuthState, ConflictItem, QuotaDetail,
 };
+#[cfg(target_os = "macos")]
+use crate::storage::normalize_proxy_url;
 use serde::Serialize;
 use std::collections::HashMap;
 #[cfg(desktop)]
@@ -901,6 +903,7 @@ pub struct ManagerSnapshot {
   pub conflicts: Vec<ConflictItem>,
   pub notice: Option<String>,
   pub modal_active: bool,
+  pub proxy_url: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -1025,6 +1028,7 @@ impl SessionManager {
       conflicts: locked.conflicts.clone(),
       notice: locked.notice.clone(),
       modal_active: locked.modal_active,
+      proxy_url: locked.store.proxy_url.clone(),
     }
   }
 
@@ -1638,6 +1642,61 @@ impl SessionManager {
     Self::snapshot_from_locked(&locked)
   }
 
+  /// 保存代理设置（仅 macOS）。代理在账号视图创建时生效，因此保存后
+  /// 关闭全部已打开的账号视图，下次打开账号时按新代理重新创建。
+  #[cfg(not(target_os = "macos"))]
+  pub async fn set_proxy_url(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    raw_proxy_url: &str,
+  ) -> Result<ManagerSnapshot, String> {
+    let _ = (app, raw_proxy_url);
+    Err("代理设置仅支持 macOS".to_string())
+  }
+
+  #[cfg(target_os = "macos")]
+  pub async fn set_proxy_url(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    raw_proxy_url: &str,
+  ) -> Result<ManagerSnapshot, String> {
+    {
+      let normalized = normalize_proxy_url(raw_proxy_url)?;
+      let next_seq = self.current_seq.fetch_add(1, Ordering::SeqCst) + 1;
+      let mut locked = self.inner.lock().await;
+      if locked.store.proxy_url == normalized {
+        return Ok(Self::snapshot_from_locked(&locked));
+      }
+      let previous = locked.store.proxy_url.clone();
+      locked.store.proxy_url = normalized.clone();
+      if let Err(err) = save_store_atomic(&locked.store_path, &locked.store) {
+        locked.store.proxy_url = previous;
+        return Err(err);
+      }
+
+      // 关闭全部已预热/打开的账号视图，确保旧代理的视图不被复用。
+      self.hide_foreground_slot(app, next_seq, &mut locked).await;
+      #[cfg(desktop)]
+      {
+        let entries: Vec<WarmDesktopEntry> = locked.warm_pool.drain().map(|(_, e)| e).collect();
+        for entry in entries {
+          Self::close_warm_entry(app, entry);
+        }
+        locked.prewarm_failed.clear();
+        Self::apply_desktop_layout_locked(app, &locked);
+      }
+
+      locked.notice = Some(match &normalized {
+        Some(url) => format!("代理已设置为 {url}，重新打开账号后生效"),
+        None => "代理已关闭，重新打开账号后生效".to_string(),
+      });
+      let snap = Self::snapshot_from_locked(&locked);
+      drop(locked);
+      self.emit_snapshot(app, &snap);
+      Ok(snap)
+    }
+  }
+
   pub async fn switch_account(
     self: &Arc<Self>,
     app: &AppHandle,
@@ -1993,6 +2052,7 @@ impl SessionManager {
     view_instance_id: u64,
     allow_blank: Arc<AtomicBool>,
     alive_flag: Arc<AtomicBool>,
+    proxy_url: Option<Url>,
   ) -> tauri::webview::WebviewBuilder<tauri::Wry> {
     let alive_nav = Arc::clone(&alive_flag);
     let mgr_for_nav = Arc::clone(self);
@@ -2012,6 +2072,8 @@ impl SessionManager {
     let mgr_for_load = Arc::clone(self);
     let app_for_load = app.clone();
     let key_for_load = key;
+
+    let proxy_for_popup = proxy_url.clone();
 
     let mut builder = tauri::webview::WebviewBuilder::new(
       webview_label,
@@ -2128,6 +2190,12 @@ impl SessionManager {
         }
       });
 
+      // 登录弹窗与主账号视图共用同一代理，避免弹窗流量绕过代理。
+      let popup_builder = match &proxy_for_popup {
+        Some(proxy) => popup_builder.proxy_url(proxy.clone()),
+        None => popup_builder,
+      };
+
       match popup_builder.build() {
         Ok(popup_window) => {
           let mgr_slot = Arc::clone(&mgr_for_popup);
@@ -2172,6 +2240,14 @@ impl SessionManager {
       builder = builder
         .data_store_identifier(*parsed_uuid.as_bytes())
         .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15");
+      if let Some(proxy) = &proxy_url {
+        builder = builder.proxy_url(proxy.clone());
+      }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+      let _ = &proxy_url;
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -2272,6 +2348,18 @@ impl SessionManager {
       Self::evict_warm_pool_if_needed(app, &mut locked, Some(&key), MAX_WARM_DESKTOP_VIEWS);
     }
 
+    #[cfg(target_os = "macos")]
+    let proxy_url = {
+      let locked = self.inner.lock().await;
+      locked
+        .store
+        .proxy_url
+        .as_deref()
+        .and_then(|s| Url::parse(s).ok())
+    };
+    #[cfg(not(target_os = "macos"))]
+    let proxy_url: Option<Url> = None;
+
     let builder = self.build_desktop_account_webview(
       app,
       key.clone(),
@@ -2281,6 +2369,7 @@ impl SessionManager {
       view_instance_id,
       allow_blank,
       Arc::clone(&alive_flag),
+      proxy_url,
     );
 
     let (init_pos, init_size) = Self::initial_hidden_child_rect(&main_win);
@@ -2604,6 +2693,18 @@ impl SessionManager {
       );
     }
 
+    #[cfg(target_os = "macos")]
+    let proxy_url = {
+      let locked = self.inner.lock().await;
+      locked
+        .store
+        .proxy_url
+        .as_deref()
+        .and_then(|s| Url::parse(s).ok())
+    };
+    #[cfg(not(target_os = "macos"))]
+    let proxy_url: Option<Url> = None;
+
     let builder = self.build_desktop_account_webview(
       app,
       key.clone(),
@@ -2613,6 +2714,7 @@ impl SessionManager {
       view_instance_id,
       allow_blank,
       Arc::clone(&alive_flag),
+      proxy_url,
     );
 
     let sync_res = (|| {

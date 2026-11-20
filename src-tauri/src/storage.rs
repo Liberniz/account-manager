@@ -82,6 +82,8 @@ pub struct AccountsStoreFile {
   pub accounts: Vec<AccountRecord>,
   pub last_committed: Option<AccountKey>,
   pub pending_cleanup: Vec<AccountKey>,
+  #[serde(default)]
+  pub proxy_url: Option<String>,
 }
 
 impl Default for AccountsStoreFile {
@@ -91,8 +93,46 @@ impl Default for AccountsStoreFile {
       accounts: Vec::new(),
       last_committed: None,
       pending_cleanup: Vec::new(),
+      proxy_url: None,
     }
   }
+}
+
+/// 校验并规范化代理地址（macOS 账号视图使用）。
+/// 空字符串表示关闭代理；只接受 `http://` / `socks5://` 且必须带端口，
+/// 暂不支持带账号密码的代理。返回规范化后的 `scheme://host:port`。
+pub fn normalize_proxy_url(raw: &str) -> Result<Option<String>, String> {
+  let trimmed = raw.trim();
+  if trimmed.is_empty() {
+    return Ok(None);
+  }
+  let parsed = url::Url::parse(trimmed)
+    .map_err(|_| "代理地址格式不正确，请填写如 http://127.0.0.1:7890".to_string())?;
+  let scheme = parsed.scheme();
+  if scheme != "http" && scheme != "socks5" {
+    return Err("代理地址只支持 http:// 或 socks5://".to_string());
+  }
+  if !parsed.username().is_empty() || parsed.password().is_some() {
+    return Err("暂不支持带账号密码的代理地址".to_string());
+  }
+  let host = parsed
+    .host_str()
+    .ok_or_else(|| "代理地址缺少主机名".to_string())?;
+  let port = parsed
+    .port()
+    .ok_or_else(|| "代理地址需包含端口，例如 http://127.0.0.1:7890".to_string())?;
+  if parsed.path() != "" && parsed.path() != "/" {
+    return Err("代理地址不应包含路径".to_string());
+  }
+  if parsed.query().is_some() || parsed.fragment().is_some() {
+    return Err("代理地址不应包含查询参数".to_string());
+  }
+  let host_part = if host.contains(':') {
+    format!("[{host}]")
+  } else {
+    host.to_string()
+  };
+  Ok(Some(format!("{scheme}://{host_part}:{port}")))
 }
 
 pub struct LoadedAccountsStore {
@@ -281,12 +321,20 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
     }
   }
 
+  let proxy_url = obj
+    .get("proxyUrl")
+    .or_else(|| obj.get("proxy_url"))
+    .and_then(|v| v.as_str())
+    .and_then(|s| normalize_proxy_url(s).ok())
+    .flatten();
+
   Ok((
     AccountsStoreFile {
       version: STORE_VERSION,
       accounts,
       last_committed,
       pending_cleanup,
+      proxy_url,
     },
     is_legacy,
   ))

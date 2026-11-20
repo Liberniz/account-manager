@@ -60,6 +60,7 @@ export interface ManagerSnapshot {
   conflicts: ConflictItem[];
   notice: string | null;
   modalActive: boolean;
+  proxyUrl: string | null;
 }
 
 export interface UpdateCheckResult {

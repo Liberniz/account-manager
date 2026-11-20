@@ -9,6 +9,7 @@ const APP_COMMANDS: &[&str] = &[
   "open_official_site",
   "resolve_uuid_conflict",
   "dismiss_notice",
+  "set_proxy_url",
   "trigger_quota_sync",
   "check_for_updates",
   "download_and_install_update",

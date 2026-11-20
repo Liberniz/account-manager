@@ -18,6 +18,7 @@ type ModalMode =
   | { kind: "add"; providerId: ProviderId; draft: string }
   | { kind: "rename"; account: AccountRecord; draft: string }
   | { kind: "remove"; account: AccountRecord }
+  | { kind: "proxy"; draft: string }
   | { kind: "update" };
 
 const PROVIDER_LOGOS: Record<ProviderId, { src: string; fullBleed: boolean }> = {
@@ -31,6 +32,7 @@ const ICON_EDIT = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" s
 const ICON_TRASH = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
 const ICON_USER_PLUS = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>`;
 const ICON_UPDATE = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
+const ICON_PROXY = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`;
 
 let snapshot: ManagerSnapshot | null = null;
 let modal: ModalMode = { kind: "none" };
@@ -416,6 +418,12 @@ async function setModal(next: ModalMode): Promise<void> {
       input.focus();
       input.select();
     }
+  } else if (next.kind === "proxy") {
+    const input = document.querySelector<HTMLInputElement>("#modal-proxy-input");
+    if (input) {
+      input.focus();
+      input.select();
+    }
   } else if (next.kind === "remove") {
     document.querySelector<HTMLButtonElement>("#modal-confirm-btn")?.focus();
   }
@@ -594,6 +602,21 @@ function renderModal(provider: ProviderInfo): string {
           <div class="modal-title">修改备注名称</div>
           <div class="modal-desc">仅更新本机列表中的显示名称，不影响已登录的官方会话。</div>
           <input id="modal-alias-input" class="modal-input" maxlength="60" placeholder="输入新的备注名称" value="${escapeHtml(modal.draft)}" />
+          <div class="modal-footer">
+            <button id="modal-cancel-btn" class="btn" type="button">取消</button>
+            <button id="modal-confirm-btn" class="btn primary" type="button">保存</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  if (modal.kind === "proxy") {
+    return `
+      <div class="inline-modal" role="dialog" aria-modal="true">
+        <div class="modal-card">
+          <div class="modal-title">代理设置（macOS）</div>
+          <div class="modal-desc">账号页面与应用内更新的流量将经此代理。支持 http:// 或 socks5://，需带端口，如 http://127.0.0.1:7890；暂不支持带账号密码的代理。保存后已打开的账号视图会关闭，重新打开账号时生效；清空并保存即关闭代理。</div>
+          <input id="modal-proxy-input" class="modal-input" maxlength="120" placeholder="http://127.0.0.1:7890（留空关闭代理）" value="${escapeHtml(modal.draft)}" />
           <div class="modal-footer">
             <button id="modal-cancel-btn" class="btn" type="button">取消</button>
             <button id="modal-confirm-btn" class="btn primary" type="button">保存</button>
@@ -907,6 +930,21 @@ function render(): void {
             )
             .join("")}
           <div class="rail-footer">
+            ${
+              snapshot.platform === "macos"
+                ? `
+            <button
+              id="proxy-settings-btn"
+              class="rail-util-btn ${snapshot.proxyUrl ? "proxy-active" : ""}"
+              title="${snapshot.proxyUrl ? `代理：${escapeHtml(snapshot.proxyUrl)}` : "代理设置（仅 macOS）"}"
+              type="button"
+            >
+              ${ICON_PROXY}
+              <span class="rail-util-label">代理</span>
+              ${snapshot.proxyUrl ? `<span class="update-dot"></span>` : ""}
+            </button>`
+                : ""
+            }
             <button
               id="check-update-btn"
               class="rail-util-btn ${updateState.result?.hasUpdate ? "has-update" : ""}"
@@ -966,6 +1004,11 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
 
   document.querySelector("#dismiss-notice-btn")?.addEventListener("click", async () => {
     await callCommand("dismiss_notice");
+  });
+
+  document.querySelector("#proxy-settings-btn")?.addEventListener("click", async () => {
+    if (modal.kind !== "none") return;
+    await setModal({ kind: "proxy", draft: state.proxyUrl ?? "" });
   });
 
   document.querySelector("#check-update-btn")?.addEventListener("click", async () => {
@@ -1054,6 +1097,22 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     });
   });
 
+  const proxyInput = document.querySelector<HTMLInputElement>("#modal-proxy-input");
+  proxyInput?.addEventListener("input", () => {
+    if (modal.kind === "proxy") {
+      modal.draft = proxyInput.value;
+    }
+  });
+  proxyInput?.addEventListener("keydown", async (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      document.querySelector<HTMLButtonElement>("#modal-confirm-btn")?.click();
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      await setModal({ kind: "none" });
+    }
+  });
+
   const aliasInput = document.querySelector<HTMLInputElement>("#modal-alias-input");
   aliasInput?.addEventListener("input", () => {
     if (modal.kind === "add" || modal.kind === "rename") {
@@ -1099,6 +1158,10 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
         providerId: currentModal.account.providerId,
         uuid: currentModal.account.uuid,
       });
+    } else if (currentModal.kind === "proxy") {
+      const proxyUrl = currentModal.draft.trim();
+      await setModal({ kind: "none" });
+      await callCommand("set_proxy_url", { proxyUrl });
     }
   });
 }

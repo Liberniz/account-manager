@@ -97,6 +97,15 @@ async fn dismiss_notice(mgr: State<'_, Arc<SessionManager>>) -> Result<ManagerSn
 }
 
 #[tauri::command]
+async fn set_proxy_url(
+  app: AppHandle,
+  mgr: State<'_, Arc<SessionManager>>,
+  proxy_url: String,
+) -> Result<ManagerSnapshot, String> {
+  mgr.set_proxy_url(&app, &proxy_url).await
+}
+
+#[tauri::command]
 async fn trigger_quota_sync(
   app: AppHandle,
   mgr: State<'_, Arc<SessionManager>>,
@@ -209,6 +218,7 @@ pub fn run() {
       open_official_site,
       resolve_uuid_conflict,
       dismiss_notice,
+      set_proxy_url,
       trigger_quota_sync,
       check_for_updates,
       download_and_install_update,

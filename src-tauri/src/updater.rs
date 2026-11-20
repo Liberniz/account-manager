@@ -270,13 +270,39 @@ fn extract_sha256_digest(raw: Option<&str>) -> Option<String> {
   }
 }
 
+/// 读取已保存的代理设置（仅 macOS 生效），供更新检查/下载走同一代理。
+#[cfg(all(desktop, target_os = "macos"))]
+fn saved_proxy_url(app: &AppHandle) -> Option<String> {
+  use tauri::Manager;
+  let dir = app.path().app_data_dir().ok()?;
+  let raw = std::fs::read_to_string(dir.join("accounts.json")).ok()?;
+  let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+  let proxy = value.get("proxyUrl").and_then(|v| v.as_str())?;
+  crate::storage::normalize_proxy_url(proxy).ok().flatten()
+}
+
+#[cfg(all(desktop, not(target_os = "macos")))]
+fn saved_proxy_url(app: &AppHandle) -> Option<String> {
+  let _ = app;
+  None
+}
+
 #[cfg(desktop)]
-fn build_http_client(user_agent: &str, timeout_secs: u64) -> Result<reqwest::Client, String> {
-  reqwest::Client::builder()
+fn build_http_client(
+  user_agent: &str,
+  timeout_secs: u64,
+  proxy_url: Option<&str>,
+) -> Result<reqwest::Client, String> {
+  let mut builder = reqwest::Client::builder()
     .user_agent(user_agent)
     .connect_timeout(std::time::Duration::from_secs(15))
     .timeout(std::time::Duration::from_secs(timeout_secs))
-    .redirect(reqwest::redirect::Policy::limited(10))
+    .redirect(reqwest::redirect::Policy::limited(10));
+  if let Some(proxy) = proxy_url {
+    builder = builder
+      .proxy(reqwest::Proxy::all(proxy).map_err(|e| format!("代理地址无效: {e}"))?);
+  }
+  builder
     .build()
     .map_err(|e| format!("创建网络客户端失败: {e}"))
 }
@@ -289,8 +315,8 @@ async fn fetch_text_with_status(
 ) -> Result<(u16, String), String> {
   #[cfg(desktop)]
   {
-    let _ = app;
-    let client = build_http_client(user_agent, 25)?;
+    let proxy = saved_proxy_url(app);
+    let client = build_http_client(user_agent, 25, proxy.as_deref())?;
     let mut req = client.get(url);
     if let Some(acc) = accept {
       req = req.header("Accept", acc);
@@ -462,7 +488,8 @@ async fn download_to_updates_cache(
 
   emit_progress(app, "downloading", 0, None, Some(0), "正在连接下载服务器...");
 
-  let client = build_http_client(user_agent, 600)?;
+  let proxy = saved_proxy_url(app);
+  let client = build_http_client(user_agent, 600, proxy.as_deref())?;
   let mut resp = client
     .get(url)
     .send()
