@@ -109,9 +109,64 @@ class AccountWebActivity : AppCompatActivity() {
                     : null;
                   setQuota(detail.planValue || detail.planLabel, rem);
                 };
+                const formatHarkReset = (iso) => {
+                  if (!iso || typeof iso !== 'string') return null;
+                  const d = new Date(iso);
+                  if (Number.isNaN(d.getTime())) return null;
+                  const pad = (n) => String(n).padStart(2, '0');
+                  const hhmm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+                  const now = new Date();
+                  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+                  const targetStart = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+                  const diffDays = Math.round((targetStart - todayStart) / 86400000);
+                  if (diffDays === 0) return '今天 ' + hhmm + ' 重置';
+                  if (diffDays === 1) return '明天 ' + hhmm + ' 重置';
+                  if (d.getFullYear() === now.getFullYear()) {
+                    return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hhmm + ' 重置';
+                  }
+                  return d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hhmm + ' 重置';
+                };
                 const mapHarkSub = (node) => {
                   if (!(location.hostname || '').toLowerCase().endsWith('hark.com')) return null;
                   if (!node || typeof node !== 'object') return null;
+                  const meters = (node.meters && typeof node.meters === 'object' ? (node.meters.harkTokens || node.meters) : null)
+                    || (node.harkTokens && typeof node.harkTokens === 'object' ? node.harkTokens : null)
+                    || (('dailyLimit' in node || 'poolLimit' in node) ? node : null);
+                  if (meters && typeof meters === 'object' && (typeof meters.dailyLimit === 'number' || typeof meters.poolLimit === 'number')) {
+                    const rawPlan = (node.plan && typeof node.plan === 'object' && typeof node.plan.name === 'string' && node.plan.name.trim())
+                      || (typeof node.planName === 'string' && node.planName.trim())
+                      || (typeof node.plan === 'string' && node.plan.trim())
+                      || '';
+                    const shortPlan = rawPlan.replace(/^hark\s+/i, '').trim();
+                    const hasDaily = typeof meters.dailyLimit === 'number' && meters.dailyLimit > 0 && typeof meters.dailyUsed === 'number';
+                    const hasMonthly = typeof meters.poolLimit === 'number' && meters.poolLimit > 0 && typeof meters.poolUsed === 'number';
+                    if (hasDaily || hasMonthly) {
+                      const dailyPct = hasDaily ? Math.max(0, Math.min(100, Math.round((meters.dailyUsed / meters.dailyLimit) * 100))) : null;
+                      const monthlyPct = hasMonthly ? Math.max(0, Math.min(100, Math.round((meters.poolUsed / meters.poolLimit) * 100))) : null;
+                      if (hasDaily) {
+                        return {
+                          planLabel: shortPlan ? (shortPlan + ' · 每日') : '每日上限',
+                          planValue: '已使用 ' + dailyPct + '%',
+                          planSubtext: formatHarkReset(meters.dailyResetsAt),
+                          planUsedPercent: dailyPct,
+                          extraLabel: hasMonthly ? '每月上限' : null,
+                          extraValue: hasMonthly ? ('已使用 ' + monthlyPct + '%') : null,
+                          extraSubtext: hasMonthly ? formatHarkReset(meters.poolResetsAt) : null,
+                          extraUsedPercent: monthlyPct
+                        };
+                      }
+                      return {
+                        planLabel: shortPlan ? (shortPlan + ' · 每月') : '每月上限',
+                        planValue: '已使用 ' + monthlyPct + '%',
+                        planSubtext: formatHarkReset(meters.poolResetsAt),
+                        planUsedPercent: monthlyPct,
+                        extraLabel: null,
+                        extraValue: null,
+                        extraSubtext: null,
+                        extraUsedPercent: null
+                      };
+                    }
+                  }
                   const u = node.usage || node.billing || node.credits || node.subscription || node;
                   if (!u || typeof u !== 'object' || 'page' in u || 'items' in u || 'messages' in u) return null;
                   const rem = u.remaining ?? u.remaining_credits ?? u.remainingCredits ?? u.credits_remaining ?? u.creditsRemaining ?? u.balance ?? u.creditBalance ?? u.left;
@@ -224,18 +279,62 @@ class AccountWebActivity : AppCompatActivity() {
                 };
                 window.__maamMapSub = mapSub;
                 window.__maamSaveDetail = saveDetail;
-                const inspectNode = (node, depth) => {
+                window.__maamRefreshHarkQuota = async (force) => {
+                  if (window.__maamQuotaInflight) return;
+                  const now = Date.now();
+                  if (!force && window.__maamQuotaFetchedAt && now - window.__maamQuotaFetchedAt < 90000) return;
+                  const curHost = (location.hostname || '').toLowerCase();
+                  if (curHost !== 'app.hark.com' && !curHost.endsWith('.hark.com')) return;
+                  window.__maamQuotaInflight = true;
+                  try {
+                    const fetchFn = window.__maamOrigFetch || window.fetch;
+                    const res = await fetchFn.call(window, '/api/billing/summary', {
+                      credentials: 'include',
+                      headers: { Accept: 'application/json' }
+                    });
+                    if (res && res.ok) {
+                      const data = await res.json();
+                      const mapped = mapHarkSub(data);
+                      if (mapped) {
+                        window.__maamQuotaFetchedAt = Date.now();
+                        saveDetail(mapped);
+                      }
+                    }
+                    if (!window.__maamApiEmail) {
+                      try {
+                        const profRes = await fetchFn.call(window, '/api/profile', {
+                          credentials: 'include',
+                          headers: { Accept: 'application/json' }
+                        });
+                        if (profRes && profRes.ok) {
+                          const prof = await profRes.json();
+                          if (prof && typeof prof.email === 'string' && prof.email.includes('@')) {
+                            window.__maamApiEmail = prof.email.trim().toLowerCase();
+                          }
+                        }
+                      } catch (_) {}
+                    }
+                  } catch (_) {
+                  } finally {
+                    window.__maamQuotaInflight = false;
+                  }
+                };
+                const inspectNode = (node, depth, skipSub) => {
                   if (!node || typeof node !== 'object' || depth > 6) return;
                   if (Array.isArray(node)) {
-                    for (let i = 0; i < node.length && i < 15; i++) inspectNode(node[i], depth + 1);
+                    for (let i = 0; i < node.length && i < 15; i++) inspectNode(node[i], depth + 1, skipSub);
                     return;
                   }
                   if (typeof node.email === 'string' && /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(node.email.trim())) {
                     window.__maamApiEmail = node.email.trim().toLowerCase();
                   }
-                  const mapped = mapSub(node);
-                  if (mapped) {
-                    saveDetail(mapped);
+                  let nextSkipSub = Boolean(skipSub);
+                  if (!nextSkipSub) {
+                    const mapped = mapSub(node);
+                    if (mapped) {
+                      saveDetail(mapped);
+                      nextSkipSub = true;
+                    }
                   }
                   const remCredits = node.remaining_credits ?? node.credits_remaining ?? node.credit_balance ?? node.quota_remaining;
                   if (typeof remCredits === 'number' && Number.isFinite(remCredits)) {
@@ -253,14 +352,14 @@ class AccountWebActivity : AppCompatActivity() {
                   const keys = Object.keys(node);
                   for (let i = 0; i < keys.length && i < 24; i++) {
                     const v = node[keys[i]];
-                    if (v && typeof v === 'object') inspectNode(v, depth + 1);
+                    if (v && typeof v === 'object') inspectNode(v, depth + 1, nextSkipSub);
                   }
                 };
                 const inspectText = (txt) => {
                   if (typeof txt !== 'string' || txt.length < 2 || txt.length > 600000) return;
-                  if (!/percent_used|percentUsed|quota_status|quotaStatus|usage_row_value_label|usageRowValueLabel|topup_balance|topupBalance|remaining_credits|credit_balance|out_of_credits|UNLIMITED|email|credits|allowance|balance|usage|tokens|billing|subscription/i.test(txt)) return;
+                  if (!/percent_used|percentUsed|quota_status|quotaStatus|usage_row_value_label|usageRowValueLabel|topup_balance|topupBalance|remaining_credits|credit_balance|out_of_credits|UNLIMITED|email|credits|allowance|balance|usage|tokens|billing|subscription|harkTokens|dailyLimit|dailyUsed|poolLimit|poolUsed|dailyResetsAt|poolResetsAt|meters/i.test(txt)) return;
                   try {
-                    inspectNode(JSON.parse(txt), 0);
+                    inspectNode(JSON.parse(txt), 0, false);
                     return;
                   } catch (_) {}
                   const lines = txt.split('\n');
@@ -269,7 +368,7 @@ class AccountWebActivity : AppCompatActivity() {
                     if (idx > 0 && idx < 12) {
                       const rest = lines[i].slice(idx + 1).trim();
                       if (rest.startsWith('{') || rest.startsWith('[')) {
-                        try { inspectNode(JSON.parse(rest), 0); } catch (_) {}
+                        try { inspectNode(JSON.parse(rest), 0, false); } catch (_) {}
                       }
                     }
                   }
@@ -279,12 +378,21 @@ class AccountWebActivity : AppCompatActivity() {
                   if (typeof origFetch === 'function') {
                     window.__maamOrigFetch = origFetch;
                     window.fetch = function(...args) {
+                      const reqUrl = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
                       const p = origFetch.apply(this, args);
                       p.then((res) => {
                         try {
                           const ct = (res.headers && res.headers.get('content-type')) || '';
                           if (ct.includes('json') || ct.includes('text')) {
                             res.clone().text().then(inspectText).catch(() => {});
+                          }
+                          if (reqUrl.includes('/api/messages') && initHost.endsWith('hark.com')) {
+                            clearTimeout(window.__maamPostHarkChatTimer);
+                            window.__maamPostHarkChatTimer = setTimeout(() => {
+                              if (typeof window.__maamRefreshHarkQuota === 'function') {
+                                window.__maamRefreshHarkQuota(true);
+                              }
+                            }, 6000);
                           }
                         } catch (_) {}
                       }).catch(() => {});
@@ -504,6 +612,9 @@ class AccountWebActivity : AppCompatActivity() {
                     })();
                   }
                 }
+                if ((host === 'app.hark.com' || host.endsWith('.hark.com')) && typeof window.__maamRefreshHarkQuota === 'function') {
+                  window.__maamRefreshHarkQuota(false);
+                }
                 let qText = '正在同步额度…';
                 let qPct = -1;
                 let qDetailStr = '';
@@ -513,6 +624,43 @@ class AccountWebActivity : AppCompatActivity() {
                     const cached = localStorage.getItem('__maam_cached_quota_detail_v2__');
                     if (cached) dObj = JSON.parse(cached);
                   } catch (_) {}
+                }
+                if ((!dObj || !dObj.planLabel) && host.endsWith('hark.com')) {
+                  const mDaily = bodyText.match(/(?:已使用每日上限的\s*(\d+(?:\.\d+)?)\s*%|(\d+(?:\.\d+)?)\s*%\s*of\s*daily\s*limit\s*used)/i);
+                  const mMonthly = bodyText.match(/(?:已使用每月上限的\s*(\d+(?:\.\d+)?)\s*%|(\d+(?:\.\d+)?)\s*%\s*of\s*monthly\s*limit\s*used)/i);
+                  if (mDaily || mMonthly) {
+                    const dPct = mDaily ? Math.max(0, Math.min(100, Math.round(parseFloat(mDaily[1] || mDaily[2])))) : null;
+                    const mPct = mMonthly ? Math.max(0, Math.min(100, Math.round(parseFloat(mMonthly[1] || mMonthly[2])))) : null;
+                    const mDailyReset = bodyText.match(/(?:每日重置|Daily reset)[\s:：·]*([^\n\r]{2,28})/i);
+                    const mMonthlyReset = bodyText.match(/(?:每月重置|Monthly reset)[\s:：·]*([^\n\r]{2,28})/i);
+                    const fmtDomReset = (m) => {
+                      if (!m || !m[1]) return null;
+                      const s = m[1].trim();
+                      return s ? (s.endsWith('重置') ? s : (s + ' 重置')) : null;
+                    };
+                    dObj = dPct !== null
+                      ? {
+                          planLabel: '每日上限',
+                          planValue: '已使用 ' + dPct + '%',
+                          planSubtext: fmtDomReset(mDailyReset),
+                          planUsedPercent: dPct,
+                          extraLabel: mPct !== null ? '每月上限' : null,
+                          extraValue: mPct !== null ? ('已使用 ' + mPct + '%') : null,
+                          extraSubtext: mPct !== null ? fmtDomReset(mMonthlyReset) : null,
+                          extraUsedPercent: mPct
+                        }
+                      : {
+                          planLabel: '每月上限',
+                          planValue: '已使用 ' + mPct + '%',
+                          planSubtext: fmtDomReset(mMonthlyReset),
+                          planUsedPercent: mPct,
+                          extraLabel: null,
+                          extraValue: null,
+                          extraSubtext: null,
+                          extraUsedPercent: null
+                        };
+                    if (typeof window.__maamSaveDetail === 'function') window.__maamSaveDetail(dObj);
+                  }
                 }
                 if ((!dObj || !dObj.planLabel) && host.endsWith('hark.com')) {
                   const creditEls = document.querySelectorAll('[class*="credit" i], [class*="usage" i], [data-testid*="credit"], [data-testid*="usage"]');

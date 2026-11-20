@@ -32,6 +32,7 @@ const LOGIN_CAPTURE_INIT_JS: &str = r#"(() => {
     if (window !== window.top) return;
     const initHost = (location.hostname || '').toLowerCase();
     const isPrimaryHost = initHost === 'muse.ai' || initHost.endsWith('.muse.ai') || initHost === 'app.hark.com' || initHost.endsWith('.hark.com');
+    const origFetch = window.fetch;
     const setQuota = (text, pct) => {
       if (!text) return;
       const cleanPct = typeof pct === 'number' && Number.isFinite(pct)
@@ -50,9 +51,64 @@ const LOGIN_CAPTURE_INIT_JS: &str = r#"(() => {
         : null;
       setQuota(detail.planValue || detail.planLabel, rem);
     };
+    const formatHarkReset = (iso) => {
+      if (!iso || typeof iso !== 'string') return null;
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return null;
+      const pad = (n) => String(n).padStart(2, '0');
+      const hhmm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const targetStart = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+      const diffDays = Math.round((targetStart - todayStart) / 86400000);
+      if (diffDays === 0) return '今天 ' + hhmm + ' 重置';
+      if (diffDays === 1) return '明天 ' + hhmm + ' 重置';
+      if (d.getFullYear() === now.getFullYear()) {
+        return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hhmm + ' 重置';
+      }
+      return d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hhmm + ' 重置';
+    };
     const mapHarkSub = (node) => {
       if (!(location.hostname || '').toLowerCase().endsWith('hark.com')) return null;
       if (!node || typeof node !== 'object') return null;
+      const meters = (node.meters && typeof node.meters === 'object' ? (node.meters.harkTokens || node.meters) : null)
+        || (node.harkTokens && typeof node.harkTokens === 'object' ? node.harkTokens : null)
+        || (('dailyLimit' in node || 'poolLimit' in node) ? node : null);
+      if (meters && typeof meters === 'object' && (typeof meters.dailyLimit === 'number' || typeof meters.poolLimit === 'number')) {
+        const rawPlan = (node.plan && typeof node.plan === 'object' && typeof node.plan.name === 'string' && node.plan.name.trim())
+          || (typeof node.planName === 'string' && node.planName.trim())
+          || (typeof node.plan === 'string' && node.plan.trim())
+          || '';
+        const shortPlan = rawPlan.replace(/^hark\s+/i, '').trim();
+        const hasDaily = typeof meters.dailyLimit === 'number' && meters.dailyLimit > 0 && typeof meters.dailyUsed === 'number';
+        const hasMonthly = typeof meters.poolLimit === 'number' && meters.poolLimit > 0 && typeof meters.poolUsed === 'number';
+        if (hasDaily || hasMonthly) {
+          const dailyPct = hasDaily ? Math.max(0, Math.min(100, Math.round((meters.dailyUsed / meters.dailyLimit) * 100))) : null;
+          const monthlyPct = hasMonthly ? Math.max(0, Math.min(100, Math.round((meters.poolUsed / meters.poolLimit) * 100))) : null;
+          if (hasDaily) {
+            return {
+              planLabel: shortPlan ? (shortPlan + ' · 每日') : '每日上限',
+              planValue: '已使用 ' + dailyPct + '%',
+              planSubtext: formatHarkReset(meters.dailyResetsAt),
+              planUsedPercent: dailyPct,
+              extraLabel: hasMonthly ? '每月上限' : null,
+              extraValue: hasMonthly ? ('已使用 ' + monthlyPct + '%') : null,
+              extraSubtext: hasMonthly ? formatHarkReset(meters.poolResetsAt) : null,
+              extraUsedPercent: monthlyPct
+            };
+          }
+          return {
+            planLabel: shortPlan ? (shortPlan + ' · 每月') : '每月上限',
+            planValue: '已使用 ' + monthlyPct + '%',
+            planSubtext: formatHarkReset(meters.poolResetsAt),
+            planUsedPercent: monthlyPct,
+            extraLabel: null,
+            extraValue: null,
+            extraSubtext: null,
+            extraUsedPercent: null
+          };
+        }
+      }
       const u = node.usage || node.billing || node.credits || node.subscription || node;
       if (!u || typeof u !== 'object' || 'page' in u || 'items' in u || 'messages' in u) return null;
       const rem = u.remaining ?? u.remaining_credits ?? u.remainingCredits ?? u.credits_remaining ?? u.creditsRemaining ?? u.balance ?? u.creditBalance ?? u.left;
@@ -236,6 +292,43 @@ const LOGIN_CAPTURE_INIT_JS: &str = r#"(() => {
       if (window.__maamQuotaInflight) return;
       const now = Date.now();
       if (!force && window.__maamQuotaFetchedAt && now - window.__maamQuotaFetchedAt < 90000) return;
+      const curHost = (location.hostname || '').toLowerCase();
+      if (curHost === 'app.hark.com' || curHost.endsWith('.hark.com')) {
+        window.__maamQuotaInflight = true;
+        try {
+          const fetchFn = typeof origFetch === 'function' ? origFetch : window.fetch;
+          const res = await fetchFn.call(window, '/api/billing/summary', {
+            credentials: 'include',
+            headers: { Accept: 'application/json' }
+          });
+          if (res && res.ok) {
+            const data = await res.json();
+            const mapped = mapHarkSub(data);
+            if (mapped) {
+              window.__maamQuotaFetchedAt = Date.now();
+              saveDetail(mapped);
+            }
+          }
+          if (!window.__maamApiEmail) {
+            try {
+              const profRes = await fetchFn.call(window, '/api/profile', {
+                credentials: 'include',
+                headers: { Accept: 'application/json' }
+              });
+              if (profRes && profRes.ok) {
+                const prof = await profRes.json();
+                if (prof && typeof prof.email === 'string' && prof.email.includes('@')) {
+                  window.__maamApiEmail = prof.email.trim().toLowerCase();
+                }
+              }
+            } catch (_) {}
+          }
+        } catch (_) {
+        } finally {
+          window.__maamQuotaInflight = false;
+        }
+        return;
+      }
       const tpGlobal = globalThis.TURBOPACK;
       if (!tpGlobal || Array.isArray(tpGlobal) || typeof tpGlobal.push !== 'function') return;
       window.__maamQuotaInflight = true;
@@ -301,10 +394,10 @@ const LOGIN_CAPTURE_INIT_JS: &str = r#"(() => {
       }
     };
 
-    const inspectNode = (node, depth) => {
+    const inspectNode = (node, depth, skipSub) => {
       if (!node || typeof node !== 'object' || depth > 6) return;
       if (Array.isArray(node)) {
-        for (let i = 0; i < node.length && i < 15; i++) inspectNode(node[i], depth + 1);
+        for (let i = 0; i < node.length && i < 15; i++) inspectNode(node[i], depth + 1, skipSub);
         return;
       }
       if (typeof node.email === 'string' && /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(node.email.trim())) {
@@ -316,9 +409,13 @@ const LOGIN_CAPTURE_INIT_JS: &str = r#"(() => {
       if (typeof node.picture === 'string' && node.picture.startsWith('http')) {
         window.__maamApiAvatar = node.picture;
       }
-      const mapped = mapSub(node);
-      if (mapped) {
-        saveDetail(mapped);
+      let nextSkipSub = Boolean(skipSub);
+      if (!nextSkipSub) {
+        const mapped = mapSub(node);
+        if (mapped) {
+          saveDetail(mapped);
+          nextSkipSub = true;
+        }
       }
       const remCredits = node.remaining_credits ?? node.credits_remaining ?? node.credit_balance ?? node.quota_remaining;
       if (typeof remCredits === 'number' && Number.isFinite(remCredits)) {
@@ -336,14 +433,14 @@ const LOGIN_CAPTURE_INIT_JS: &str = r#"(() => {
       const keys = Object.keys(node);
       for (let i = 0; i < keys.length && i < 24; i++) {
         const v = node[keys[i]];
-        if (v && typeof v === 'object') inspectNode(v, depth + 1);
+        if (v && typeof v === 'object') inspectNode(v, depth + 1, nextSkipSub);
       }
     };
     const inspectText = (txt) => {
       if (typeof txt !== 'string' || txt.length < 2 || txt.length > 600000) return;
-      if (!/percent_used|percentUsed|quota_status|quotaStatus|usage_row_value_label|usageRowValueLabel|topup_balance|topupBalance|remaining_credits|credit_balance|out_of_credits|UNLIMITED|email|credits|allowance|balance|usage|tokens|billing|subscription/i.test(txt)) return;
+      if (!/percent_used|percentUsed|quota_status|quotaStatus|usage_row_value_label|usageRowValueLabel|topup_balance|topupBalance|remaining_credits|credit_balance|out_of_credits|UNLIMITED|email|credits|allowance|balance|usage|tokens|billing|subscription|harkTokens|dailyLimit|dailyUsed|poolLimit|poolUsed|dailyResetsAt|poolResetsAt|meters/i.test(txt)) return;
       try {
-        inspectNode(JSON.parse(txt), 0);
+        inspectNode(JSON.parse(txt), 0, false);
         return;
       } catch (_) {}
       const lines = txt.split('\n');
@@ -352,13 +449,12 @@ const LOGIN_CAPTURE_INIT_JS: &str = r#"(() => {
         if (idx > 0 && idx < 12) {
           const rest = lines[i].slice(idx + 1).trim();
           if (rest.startsWith('{') || rest.startsWith('[')) {
-            try { inspectNode(JSON.parse(rest), 0); } catch (_) {}
+            try { inspectNode(JSON.parse(rest), 0, false); } catch (_) {}
           }
         }
       }
     };
     if (isPrimaryHost) {
-      const origFetch = window.fetch;
       if (typeof origFetch === 'function') {
         window.fetch = function(...args) {
           const reqUrl = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
@@ -369,7 +465,7 @@ const LOGIN_CAPTURE_INIT_JS: &str = r#"(() => {
               if (ct.includes('json') || ct.includes('text')) {
                 res.clone().text().then(inspectText).catch(() => {});
               }
-              if (reqUrl.includes('/api/chat')) {
+              if (reqUrl.includes('/api/chat') || reqUrl.includes('/api/messages')) {
                 clearTimeout(window.__maamPostChatTimer);
                 window.__maamPostChatTimer = setTimeout(() => {
                   if (typeof window.__maamRefreshBackendQuota === 'function') {
@@ -597,7 +693,7 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
     };
 
     const extractQuota = () => {
-      if (host === 'muse.ai' || host.endsWith('.muse.ai')) {
+      if (isPrimary) {
         if (typeof window.__maamRefreshBackendQuota === 'function') {
           window.__maamRefreshBackendQuota(false);
         }
@@ -622,6 +718,42 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
       } catch (_) {}
 
       if (host.endsWith('hark.com')) {
+        const mDaily = bodyText.match(/(?:已使用每日上限的\s*(\d+(?:\.\d+)?)\s*%|(\d+(?:\.\d+)?)\s*%\s*of\s*daily\s*limit\s*used)/i);
+        const mMonthly = bodyText.match(/(?:已使用每月上限的\s*(\d+(?:\.\d+)?)\s*%|(\d+(?:\.\d+)?)\s*%\s*of\s*monthly\s*limit\s*used)/i);
+        if (mDaily || mMonthly) {
+          const dPct = mDaily ? Math.max(0, Math.min(100, Math.round(parseFloat(mDaily[1] || mDaily[2])))) : null;
+          const mPct = mMonthly ? Math.max(0, Math.min(100, Math.round(parseFloat(mMonthly[1] || mMonthly[2])))) : null;
+          const mDailyReset = bodyText.match(/(?:每日重置|Daily reset)[\s:：·]*([^\n\r]{2,28})/i);
+          const mMonthlyReset = bodyText.match(/(?:每月重置|Monthly reset)[\s:：·]*([^\n\r]{2,28})/i);
+          const fmtDomReset = (m) => {
+            if (!m || !m[1]) return null;
+            const s = m[1].trim();
+            return s ? (s.endsWith('重置') ? s : (s + ' 重置')) : null;
+          };
+          const d = dPct !== null
+            ? {
+                planLabel: '每日上限',
+                planValue: '已使用 ' + dPct + '%',
+                planSubtext: fmtDomReset(mDailyReset),
+                planUsedPercent: dPct,
+                extraLabel: mPct !== null ? '每月上限' : null,
+                extraValue: mPct !== null ? ('已使用 ' + mPct + '%') : null,
+                extraSubtext: mPct !== null ? fmtDomReset(mMonthlyReset) : null,
+                extraUsedPercent: mPct
+              }
+            : {
+                planLabel: '每月上限',
+                planValue: '已使用 ' + mPct + '%',
+                planSubtext: fmtDomReset(mMonthlyReset),
+                planUsedPercent: mPct,
+                extraLabel: null,
+                extraValue: null,
+                extraSubtext: null,
+                extraUsedPercent: null
+              };
+          if (typeof window.__maamSaveDetail === 'function') window.__maamSaveDetail(d);
+          return { text: d.planValue, pct: 100 - d.planUsedPercent, detail: d };
+        }
         const creditEls = document.querySelectorAll('[class*="credit" i], [class*="usage" i], [data-testid*="credit"], [data-testid*="usage"]');
         for (const el of creditEls) {
           const txt = (el.innerText || '').trim();

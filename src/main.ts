@@ -139,6 +139,20 @@ function resolveQuotaState(acc: AccountRecord): {
       ((extraUsed !== null && extraUsed >= 85) ||
         extraVal.includes("偏低") ||
         extraVal.includes("LOW"));
+    const extraIsCap = Boolean(d.extraLabel && /月|monthly/i.test(d.extraLabel));
+
+    if (extraIsCap) {
+      if (planDepleted) {
+        return { status: "critical", label: "日满", extraDepleted };
+      }
+      if (extraDepleted) {
+        return { status: "critical", label: "月满", extraDepleted };
+      }
+      if (planLow || extraLow) {
+        return { status: "low", label: "偏低", extraDepleted };
+      }
+      return { status: "normal", label: "", extraDepleted };
+    }
 
     if (planDepleted) {
       if (!hasExtra || extraDepleted) {
@@ -192,8 +206,9 @@ function formatShortExtraText(
   ) {
     return null;
   }
+  const prefix = detail.extraLabel && /月|monthly/i.test(detail.extraLabel) ? "月" : "额外";
   if (extraDepleted) {
-    return "额外 100% · 已耗尽";
+    return `${prefix} 100% · 已耗尽`;
   }
   const parsed = splitQuotaValue(detail.extraValue ?? "");
   const pctPart =
@@ -208,13 +223,13 @@ function formatShortExtraText(
         .trim()
     : "";
   if (pctPart && notePart) {
-    return `额外 ${pctPart} · ${notePart}`;
+    return `${prefix} ${pctPart} · ${notePart}`;
   }
   if (notePart) {
-    return `额外 · ${notePart}`;
+    return `${prefix} · ${notePart}`;
   }
   if (pctPart) {
-    return `额外 ${pctPart}`;
+    return `${prefix} ${pctPart}`;
   }
   return detail.extraLabel ?? "额外额度";
 }
