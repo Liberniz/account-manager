@@ -1382,11 +1382,11 @@ body,
 }
 
 /* ===== v0.3.3: 账号拖拽排序 ===== */
-.account-row[draggable="true"] {
+.account-row.drag-enabled {
   cursor: grab;
 }
 
-.account-row[draggable="true"]:active {
+.account-row.drag-enabled:active {
   cursor: grabbing;
 }
 
@@ -1395,7 +1395,11 @@ body,
 }
 
 .account-row.dragging {
-  opacity: 0.45;
+  opacity: 0.85;
+  transition: none;
+  position: relative;
+  z-index: 5;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.18);
 }
 
 .account-row.drop-before {

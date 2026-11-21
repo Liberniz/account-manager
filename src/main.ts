@@ -37,8 +37,8 @@ let snapshot: ManagerSnapshot | null = null;
 let modal: ModalMode = { kind: "none" };
 let optimisticSwitching: AccountKey | null = null;
 let accountSearchQuery = "";
-let dragUuid: string | null = null;
 let dragInProgress = false;
+let suppressNextClick = false;
 let busy = false;
 let lastRenderedUpdateStage: string | null = null;
 
@@ -873,7 +873,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
           accountSearchQuery.trim() !== "" &&
           !searchText.includes(accountSearchQuery.trim().toLowerCase());
         return `
-          <div class="${rowClass}" data-switch-uuid="${escapeHtml(acc.uuid)}" data-search-text="${escapeHtml(searchText)}" ${searchHidden ? `style="display:none;"` : ""} ${accountSearchQuery.trim() === "" ? `draggable="true" title="拖动可排序"` : ""}>
+          <div class="${rowClass}${accountSearchQuery.trim() === "" ? " drag-enabled" : ""}" data-switch-uuid="${escapeHtml(acc.uuid)}" data-search-text="${escapeHtml(searchText)}" ${searchHidden ? `style="display:none;"` : ""}>
             <div class="account-header">
               <div class="avatar-wrap">
                 ${avatarNodeHtml}
@@ -1101,71 +1101,94 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     });
   });
 
-  // 拖拽排序：拖动账号行调整顺序，落点决定插入位置，松手后持久化。
+  // 拖拽排序（指针式实现）：按下账号行移动超过阈值进入拖拽，被拖行跟随指针，
+  // 蓝线指示落点，松手后持久化。不走 HTML5 DnD——Tauri/WKWebView 里页面级
+  // 拖放事件会被原生文件拖放处理拦截，drop 经常送达不了（v0.3.3 的故障）。
   document.querySelectorAll<HTMLElement>(".account-row[data-switch-uuid]").forEach((row) => {
-    if (!row.draggable) return;
-    row.addEventListener("dragstart", (e) => {
-      dragUuid = row.dataset.switchUuid || null;
-      if (!dragUuid) return;
-      dragInProgress = true;
-      row.classList.add("dragging");
-      if (e.dataTransfer) {
-        e.dataTransfer.effectAllowed = "move";
-        try {
-          e.dataTransfer.setData("text/plain", dragUuid);
-        } catch {
-          /* WKWebView 某些版本 setData 可能抛错，忽略 */
+    if (accountSearchQuery.trim() !== "") return;
+    row.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      if (modal.kind !== "none" || state.conflicts.length > 0) return;
+      if ((e.target as HTMLElement).closest("button, a, input, textarea, select")) return;
+      const startUuid = row.dataset.switchUuid;
+      if (!startUuid) return;
+      const startY = e.clientY;
+      let dragging = false;
+      let targetUuid: string | null = null;
+      let targetBefore = true;
+
+      const clearIndicators = () => {
+        document
+          .querySelectorAll(".account-row.drop-before, .account-row.drop-after")
+          .forEach((el) => el.classList.remove("drop-before", "drop-after"));
+      };
+      const onMove = (ev: PointerEvent) => {
+        const dy = ev.clientY - startY;
+        if (!dragging && Math.abs(dy) > 5) {
+          dragging = true;
+          dragInProgress = true;
+          row.classList.add("dragging");
         }
-      }
-    });
-    row.addEventListener("dragend", () => {
-      dragInProgress = false;
-      dragUuid = null;
-      document
-        .querySelectorAll(".account-row.dragging, .account-row.drop-before, .account-row.drop-after")
-        .forEach((el) => el.classList.remove("dragging", "drop-before", "drop-after"));
-      render();
-    });
-    row.addEventListener("dragover", (e) => {
-      if (!dragInProgress || !dragUuid) return;
-      const targetUuid = row.dataset.switchUuid;
-      if (!targetUuid || targetUuid === dragUuid) return;
-      e.preventDefault();
-      if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-      const rect = row.getBoundingClientRect();
-      const before = e.clientY - rect.top < rect.height / 2;
-      document
-        .querySelectorAll(".account-row.drop-before, .account-row.drop-after")
-        .forEach((el) => {
-          if (el !== row) el.classList.remove("drop-before", "drop-after");
-        });
-      row.classList.toggle("drop-before", before);
-      row.classList.toggle("drop-after", !before);
-    });
-    row.addEventListener("drop", async (e) => {
-      e.preventDefault();
-      const targetUuid = row.dataset.switchUuid;
-      const rect = row.getBoundingClientRect();
-      const before = e.clientY - rect.top < rect.height / 2;
-      const moving = dragUuid;
-      dragInProgress = false;
-      dragUuid = null;
-      if (!moving || !targetUuid || moving === targetUuid || !snapshot) {
-        render();
-        return;
-      }
-      const ids = snapshot.accounts
-        .filter((a) => a.providerId === provider.id)
-        .map((a) => a.uuid);
-      const from = ids.indexOf(moving);
-      if (from < 0 || !ids.includes(targetUuid)) {
-        render();
-        return;
-      }
-      ids.splice(from, 1);
-      const to = ids.indexOf(targetUuid);
-      ids.splice(before ? to : to + 1, 0, moving);
-      await callCommand("reorder_accounts", { providerId: provider.id, orderedUuids: ids });
+        if (!dragging) return;
+        ev.preventDefault();
+        row.style.transform = `translateY(${dy}px)`;
+        const rows = Array.from(
+          document.querySelectorAll<HTMLElement>(".account-row[data-switch-uuid]")
+        ).filter((el) => el !== row);
+        clearIndicators();
+        targetUuid = null;
+        for (const el of rows) {
+          const r = el.getBoundingClientRect();
+          if (ev.clientY < r.top + r.height / 2) {
+            targetUuid = el.dataset.switchUuid || null;
+            targetBefore = true;
+            el.classList.add("drop-before");
+            break;
+          }
+        }
+        if (!targetUuid && rows.length > 0) {
+          const last = rows[rows.length - 1];
+          targetUuid = last.dataset.switchUuid || null;
+          targetBefore = false;
+          last.classList.add("drop-after");
+        }
+      };
+      const onUp = async () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+        if (!dragging) return;
+        suppressNextClick = true;
+        window.setTimeout(() => {
+          suppressNextClick = false;
+        }, 80);
+        const moving = startUuid;
+        const tUuid = targetUuid;
+        const tBefore = targetBefore;
+        row.classList.remove("dragging");
+        row.style.transform = "";
+        clearIndicators();
+        dragInProgress = false;
+        if (!tUuid || tUuid === moving) {
+          render();
+          return;
+        }
+        const ids = state.accounts
+          .filter((a) => a.providerId === provider.id)
+          .map((a) => a.uuid);
+        const from = ids.indexOf(moving);
+        if (from < 0 || !ids.includes(tUuid)) {
+          render();
+          return;
+        }
+        ids.splice(from, 1);
+        const to = ids.indexOf(tUuid);
+        ids.splice(tBefore ? to : to + 1, 0, moving);
+        await callCommand("reorder_accounts", { providerId: provider.id, orderedUuids: ids });
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
     });
   });
 
@@ -1198,6 +1221,10 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
 
   document.querySelectorAll<HTMLElement>("[data-switch-uuid]").forEach((row) => {
     row.addEventListener("click", async () => {
+      if (suppressNextClick) {
+        suppressNextClick = false;
+        return;
+      }
       if (modal.kind !== "none" || state.conflicts.length > 0) return;
       const uuid = row.dataset.switchUuid;
       if (!uuid) return;
