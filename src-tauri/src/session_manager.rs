@@ -161,6 +161,113 @@ enum TeleagentPoints {
   Failed(String),
 }
 
+/// GLaDOS 系站点域名（会话按域名隔离）。
+const GLADOS_DOMAINS: &[&str] = &[
+  "glados.cloud",
+  "glados.one",
+  "glados.rocks",
+  "glados-facility.com",
+  "railgun.info",
+];
+/// GLaDOS 接口/视图统一 UA（macOS Safari，与账号视图一致，避免平台不一致）。
+const GLADOS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+
+/// 生成 GLaDOS 视图的初始化脚本：在页面脚本运行前，把整行 Cookie 逐项种入
+/// 该账号域名（gld:sess 等是 HttpOnly，读不回也无需读，种下后请求自带）。
+/// reload=true 时种完立即刷新（更新 Cookie 后让已有视图换上新会话）。
+fn glados_cookie_script_impl(cookie: &str, domain: &str, reload: bool) -> String {
+  let cookie = cookie.trim();
+  let domain = domain.trim().to_lowercase();
+  if cookie.is_empty() || domain.is_empty() {
+    return "void 0;".to_string();
+  }
+  let esc_cookie = cookie
+    .replace('\\', "\\\\")
+    .replace('\'', "\\'")
+    .replace('\n', "")
+    .replace('\r', "");
+  let esc_domain = domain.replace('\\', "\\\\").replace('\'', "\\'");
+  let reload_line = if reload {
+    "      location.reload();\n"
+  } else {
+    ""
+  };
+  format!(
+    r#"(() => {{
+  try {{
+    const host = (location.hostname || '').toLowerCase();
+    const domain = '{esc_domain}';
+    if (host !== domain && !host.endsWith('.' + domain)) return;
+    const raw = '{esc_cookie}';
+    for (const pair of raw.split(';')) {{
+      const i = pair.indexOf('=');
+      if (i <= 0) continue;
+      const name = pair.slice(0, i).trim();
+      const value = pair.slice(i + 1).trim();
+      if (!name) continue;
+      document.cookie = name + '=' + value + '; path=/; max-age=2592000; SameSite=Lax';
+    }}
+{reload_line}  }} catch (_) {{}}
+}})();"#
+  )
+}
+
+fn glados_cookie_script(cookie: &str, domain: &str) -> String {
+  glados_cookie_script_impl(cookie, domain, false)
+}
+
+/// 更新 Cookie 时在已有视图里执行：种入新 Cookie 并立即刷新。
+fn glados_cookie_reset_script(cookie: &str, domain: &str) -> String {
+  glados_cookie_script_impl(cookie, domain, true)
+}
+
+/// Cookie 是否成对完整（gld 系或 koa 系任一对齐全）。
+fn glados_cookie_complete(cookie: &str) -> bool {
+  let has_gld = cookie.contains("gld:sess=") && cookie.contains("gld:sess.sig=");
+  let has_koa = cookie.contains("koa:sess=") && cookie.contains("koa:sess.sig=");
+  has_gld || has_koa
+}
+
+/// 归一化用户输入的站点域名（允许粘贴带 https:// 的地址）。
+fn normalize_glados_domain(raw: &str) -> Option<String> {
+  let mut d = raw.trim().to_lowercase();
+  if let Some(rest) = d.strip_prefix("https://") {
+    d = rest.to_string();
+  } else if let Some(rest) = d.strip_prefix("http://") {
+    d = rest.to_string();
+  }
+  let d = d.split('/').next().unwrap_or("").trim().to_string();
+  if GLADOS_DOMAINS.contains(&d.as_str()) {
+    Some(d)
+  } else {
+    None
+  }
+}
+
+/// 账号实际入口：GLaDOS 会话按域名隔离，用账号自己的域名进控制台；
+/// 其余服务用 provider 规格里的入口。
+fn entry_url_for(account: &AccountRecord) -> Url {
+  if account.provider_id == ProviderId::Glados && !account.gd_domain.is_empty() {
+    if let Ok(u) = Url::parse(&format!("https://{}/console", account.gd_domain)) {
+      return u;
+    }
+  }
+  Url::parse(get_provider(account.provider_id).info.entry_url).expect("valid provider entry url")
+}
+
+struct GladosStatus {
+  email: String,
+  left_days: f64,
+  points: Option<u64>,
+  streak: Option<u64>,
+}
+
+enum GladosFetch {
+  Ok(GladosStatus),
+  Invalid,
+  Failed(String),
+}
+
 #[cfg(desktop)]
 const LOGIN_CAPTURE_INIT_JS: &str = r#"(() => {
   try {
@@ -660,6 +767,15 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
       const r = el.getBoundingClientRect();
       return r.width > 120 && r.height > 20;
     });
+    if (host === 'glados.cloud' || host === 'glados.one' || host === 'glados.rocks' || host === 'glados-facility.com' || host === 'railgun.info') {
+      if (path.includes('/login')) {
+        return makeLoggedOut();
+      }
+      if (path.startsWith('/console')) {
+        return JSON.stringify({ auth: true, loggedOut: false, typed: '', email: '', avatar: '', quotaText: '', quotaPct: null, quotaDetail: null, sessionState: 'unknown', pendingHotkey });
+      }
+      return makeLoading();
+    }
     if (host === 'agent.teleai.com.cn') {
       if (path.includes('teleagent-login')) {
         return makeLoggedOut();
@@ -1088,6 +1204,8 @@ impl SessionManager {
       // TeleAgent 凭证只落盘，绝不下发界面层。
       acc.teleagent_token = String::new();
       acc.teleagent_device_id = String::new();
+      // GLaDOS Cookie 同样只落盘。
+      acc.gd_cookie = String::new();
       acc.session_state = locked
         .session_states
         .get(&k)
@@ -1144,7 +1262,17 @@ impl SessionManager {
         .as_ref()
         .map(|k| k.provider_id == acc.provider_id && k.uuid == acc.uuid)
         .unwrap_or(false);
-      let state_text = if acc.provider_id == ProviderId::TeleAgent {
+      let state_text = if acc.provider_id == ProviderId::Glados {
+        match acc.auth_state {
+          crate::storage::AuthState::LoggedOut => "Cookie 已失效".to_string(),
+          _ => match acc.gd_left_days {
+            Some(d) if d >= 1.0 => format!("剩余 {} 天", d.round() as i64),
+            Some(d) if d > 0.0 => "剩余不足 1 天".to_string(),
+            Some(_) => "已过期".to_string(),
+            None => "状态待同步".to_string(),
+          },
+        }
+      } else if acc.provider_id == ProviderId::TeleAgent {
         match acc.auth_state {
           crate::storage::AuthState::LoggedOut => "token 已失效".to_string(),
           _ => match acc.ta_total_points {
@@ -1620,6 +1748,13 @@ impl SessionManager {
         ta_claim_days: None,
         ta_points_synced_at_ms: None,
         ta_points_error: String::new(),
+        gd_cookie: String::new(),
+        gd_domain: String::new(),
+        gd_left_days: None,
+        gd_points: None,
+        gd_streak: None,
+        gd_synced_at_ms: None,
+        gd_error: String::new(),
       });
       save_store_atomic(&locked.store_path, &locked.store)?;
       locked.selected_provider_id = provider_id;
@@ -1919,6 +2054,13 @@ impl SessionManager {
         ta_claim_days: None,
         ta_points_synced_at_ms: None,
         ta_points_error: String::new(),
+        gd_cookie: String::new(),
+        gd_domain: String::new(),
+        gd_left_days: None,
+        gd_points: None,
+        gd_streak: None,
+        gd_synced_at_ms: None,
+        gd_error: String::new(),
       });
       save_store_atomic(&locked.store_path, &locked.store)?;
       locked.selected_provider_id = provider_id;
@@ -2155,6 +2297,355 @@ impl SessionManager {
       Self::snapshot_from_locked(&locked)
     };
     self.emit_snapshot(app, &snap);
+  }
+
+  /// 拉单个 GLaDOS 账号的状态（剩余天数 + 积分/连签）。
+  async fn fetch_glados_status(&self, domain: &str, cookie: &str) -> GladosFetch {
+    let proxy = self.effective_proxy_url().await;
+    let mut builder = reqwest::Client::builder()
+      .user_agent(GLADOS_UA)
+      .connect_timeout(std::time::Duration::from_secs(10))
+      .timeout(std::time::Duration::from_secs(15));
+    if let Some(p) = &proxy {
+      if let Ok(px) = reqwest::Proxy::all(p.as_str()) {
+        builder = builder.proxy(px);
+      }
+    }
+    let client = match builder.build() {
+      Ok(c) => c,
+      Err(e) => return GladosFetch::Failed(format!("网络客户端创建失败: {e}")),
+    };
+    let resp = client
+      .get(format!("https://{domain}/api/user/status"))
+      .header("Cookie", cookie)
+      .header("Accept", "application/json")
+      .send()
+      .await;
+    let resp = match resp {
+      Ok(r) => r,
+      Err(e) => return GladosFetch::Failed(format!("状态查询失败: {e}")),
+    };
+    let body = resp.text().await.unwrap_or_default();
+    let value: serde_json::Value = match serde_json::from_str(&body) {
+      Ok(v) => v,
+      Err(_) => return GladosFetch::Failed("状态查询失败：响应格式异常".to_string()),
+    };
+    let code = value.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if code == -2 {
+      return GladosFetch::Invalid;
+    }
+    if code != 0 {
+      let msg = value
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("未知错误");
+      return GladosFetch::Failed(format!("状态查询失败：{msg}"));
+    }
+    let data = value.get("data");
+    let left_days = data
+      .and_then(|d| d.get("leftDays"))
+      .and_then(|v| v.as_f64())
+      .unwrap_or(0.0);
+    let email = ["email", "username", "name"]
+      .iter()
+      .filter_map(|k| data.and_then(|d| d.get(k)).and_then(|v| v.as_str()))
+      .next()
+      .unwrap_or("")
+      .trim()
+      .to_string();
+    // 积分/连签是次要信息，拉不到不连累主状态。
+    let (mut points, mut streak) = (None, None);
+    if let Ok(r) = client
+      .get(format!("https://{domain}/api/user/points"))
+      .header("Cookie", cookie)
+      .header("Accept", "application/json")
+      .send()
+      .await
+    {
+      if let Ok(text) = r.text().await {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+          if v.get("code").and_then(|c| c.as_i64()) == Some(0) {
+            points = v
+              .get("points")
+              .and_then(|x| x.as_u64())
+              .or_else(|| v.get("points").and_then(|x| x.as_f64()).map(|f| f as u64));
+            streak = v.get("streak").and_then(|x| x.as_u64());
+          }
+        }
+      }
+    }
+    GladosFetch::Ok(GladosStatus {
+      email,
+      left_days,
+      points,
+      streak,
+    })
+  }
+
+  /// 批量同步 GLaDOS 账号状态：非强制时只拉 10 分钟未更新的账号。
+  pub async fn sync_glados_status(self: &Arc<Self>, app: &AppHandle, force: bool) {
+    let now = now_ms();
+    let targets: Vec<(AccountKey, String, String)> = {
+      let locked = self.inner.lock().await;
+      locked
+        .store
+        .accounts
+        .iter()
+        .filter(|a| a.provider_id == ProviderId::Glados && !a.gd_cookie.is_empty())
+        .filter(|a| {
+          force
+            || a.gd_synced_at_ms
+              .map(|t| now.saturating_sub(t) > 600_000)
+              .unwrap_or(true)
+        })
+        .map(|a| {
+          (
+            AccountKey {
+              provider_id: a.provider_id,
+              uuid: a.uuid.clone(),
+            },
+            a.gd_domain.clone(),
+            a.gd_cookie.clone(),
+          )
+        })
+        .collect()
+    };
+    if targets.is_empty() {
+      return;
+    }
+    let mut results: Vec<(AccountKey, GladosFetch)> = Vec::new();
+    for (key, domain, cookie) in &targets {
+      let outcome = self.fetch_glados_status(domain, cookie).await;
+      results.push((key.clone(), outcome));
+    }
+    let snap = {
+      let mut locked = self.inner.lock().await;
+      for (key, outcome) in &results {
+        if let Some(acc) = locked
+          .store
+          .accounts
+          .iter_mut()
+          .find(|a| a.provider_id == key.provider_id && a.uuid == key.uuid)
+        {
+          acc.gd_synced_at_ms = Some(now_ms());
+          match outcome {
+            GladosFetch::Ok(st) => {
+              acc.gd_left_days = Some(st.left_days);
+              if st.points.is_some() {
+                acc.gd_points = st.points;
+              }
+              if st.streak.is_some() {
+                acc.gd_streak = st.streak;
+              }
+              acc.gd_error = String::new();
+              acc.auth_state = AuthState::Authenticated;
+            }
+            GladosFetch::Invalid => {
+              acc.gd_error = "Cookie 已失效".to_string();
+              acc.auth_state = AuthState::LoggedOut;
+            }
+            GladosFetch::Failed(msg) => {
+              acc.gd_error = msg.clone();
+            }
+          }
+        }
+      }
+      let _ = save_store_atomic(&locked.store_path, &locked.store);
+      Self::snapshot_from_locked(&locked)
+    };
+    self.emit_snapshot(app, &snap);
+  }
+
+  /// 添加 GLaDOS 账号：不走网页登录，保存整行 Cookie；添加前先调状态
+  /// 接口验活（失效当场报错），别名取账号邮箱，到期/积分同步入库。
+  pub async fn add_glados_account(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    raw_domain: &str,
+    raw_cookie: &str,
+  ) -> Result<ManagerSnapshot, String> {
+    let cookie = raw_cookie.trim().to_string();
+    if cookie.is_empty() {
+      return Err("请粘贴 Cookie 整行".to_string());
+    }
+    if !glados_cookie_complete(&cookie) {
+      return Err(
+        "Cookie 不完整：需要包含 gld:sess 与 gld:sess.sig（或 koa:sess 与 koa:sess.sig），请从浏览器 F12 → Network 里整行复制"
+          .to_string(),
+      );
+    }
+    let Some(domain) = normalize_glados_domain(raw_domain) else {
+      return Err("站点域名不在支持列表里（glados.cloud / glados.one / glados.rocks / glados-facility.com / railgun.info）".to_string());
+    };
+    let status = match self.fetch_glados_status(&domain, &cookie).await {
+      GladosFetch::Ok(st) => st,
+      GladosFetch::Invalid => {
+        return Err(
+          "Cookie 已失效或与该站点不匹配（服务器返回 code -2），请在该站点重新登录后整行复制"
+            .to_string(),
+        )
+      }
+      GladosFetch::Failed(m) => return Err(m),
+    };
+    let provider_id = ProviderId::Glados;
+    let (alias, auto_alias) = if status.email.is_empty() {
+      ("GLaDOS 账号".to_string(), true)
+    } else {
+      (status.email.clone(), false)
+    };
+    let created_key = {
+      let mut locked = self.inner.lock().await;
+      if !locked.conflicts.is_empty() {
+        return Err("请先处理 UUID 归属冲突后再新增账号".to_string());
+      }
+      if locked
+        .store
+        .accounts
+        .iter()
+        .any(|a| a.provider_id == provider_id && a.gd_cookie == cookie)
+      {
+        return Err("这个 Cookie 已经添加过了".to_string());
+      }
+      let uuid = loop {
+        let candidate = Uuid::new_v4().hyphenated().to_string();
+        let used_in_accounts = locked.store.accounts.iter().any(|a| a.uuid == candidate);
+        let used_in_cleanup = locked.store.pending_cleanup.iter().any(|k| k.uuid == candidate);
+        if !used_in_accounts && !used_in_cleanup {
+          break candidate;
+        }
+      };
+      let next_sort_order = locked
+        .store
+        .accounts
+        .iter()
+        .map(|a| a.sort_order)
+        .max()
+        .unwrap_or(-1024)
+        + 1024;
+      locked.store.accounts.push(AccountRecord {
+        provider_id,
+        uuid: uuid.clone(),
+        alias,
+        created_at_ms: now_ms(),
+        auto_alias,
+        avatar_url: None,
+        quota_text: None,
+        quota_percent: None,
+        quota_detail: None,
+        auth_state: AuthState::Authenticated,
+        quota_synced_at_ms: None,
+        quota_stale: false,
+        note: String::new(),
+        session_state: "unknown".to_string(),
+        view_error: false,
+        sort_order: next_sort_order,
+        teleagent_token: String::new(),
+        teleagent_device_id: String::new(),
+        token_expires_at_ms: None,
+        ta_claimed_today: None,
+        ta_total_points: None,
+        ta_claim_days: None,
+        ta_points_synced_at_ms: None,
+        ta_points_error: String::new(),
+        gd_cookie: cookie,
+        gd_domain: domain,
+        gd_left_days: Some(status.left_days),
+        gd_points: status.points,
+        gd_streak: status.streak,
+        gd_synced_at_ms: Some(now_ms()),
+        gd_error: String::new(),
+      });
+      save_store_atomic(&locked.store_path, &locked.store)?;
+      locked.selected_provider_id = provider_id;
+      AccountKey { provider_id, uuid }
+    };
+    self.switch_account_internal(app, created_key, false).await
+  }
+
+  /// 更新 GLaDOS 账号的 Cookie（失效换新）：先验活再落盘，并让已有
+  /// 视图立即种入新 Cookie 并刷新。
+  pub async fn update_glados_cookie(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    raw_uuid: &str,
+    raw_cookie: &str,
+  ) -> Result<ManagerSnapshot, String> {
+    let cookie = raw_cookie.trim().to_string();
+    if cookie.is_empty() {
+      return Err("请粘贴 Cookie 整行".to_string());
+    }
+    if !glados_cookie_complete(&cookie) {
+      return Err(
+        "Cookie 不完整：需要包含 gld:sess 与 gld:sess.sig（或 koa:sess 与 koa:sess.sig），请从浏览器 F12 → Network 里整行复制"
+          .to_string(),
+      );
+    }
+    let key = AccountKey {
+      provider_id: ProviderId::Glados,
+      uuid: raw_uuid.to_string(),
+    };
+    let domain = {
+      let locked = self.inner.lock().await;
+      locked
+        .store
+        .accounts
+        .iter()
+        .find(|a| a.provider_id == ProviderId::Glados && a.uuid == raw_uuid)
+        .map(|a| a.gd_domain.clone())
+        .ok_or_else(|| "账号不存在".to_string())?
+    };
+    let status = match self.fetch_glados_status(&domain, &cookie).await {
+      GladosFetch::Ok(st) => st,
+      GladosFetch::Invalid => {
+        return Err(
+          "Cookie 已失效或与该站点不匹配（服务器返回 code -2），请在该站点重新登录后整行复制"
+            .to_string(),
+        )
+      }
+      GladosFetch::Failed(m) => return Err(m),
+    };
+    let warm_label = {
+      let mut locked = self.inner.lock().await;
+      let Some(acc) = locked
+        .store
+        .accounts
+        .iter_mut()
+        .find(|a| a.provider_id == ProviderId::Glados && a.uuid == raw_uuid)
+      else {
+        return Err("账号不存在".to_string());
+      };
+      acc.gd_cookie = cookie.clone();
+      acc.gd_left_days = Some(status.left_days);
+      if status.points.is_some() {
+        acc.gd_points = status.points;
+      }
+      if status.streak.is_some() {
+        acc.gd_streak = status.streak;
+      }
+      acc.gd_synced_at_ms = Some(now_ms());
+      acc.gd_error = String::new();
+      acc.auth_state = AuthState::Authenticated;
+      if acc.auto_alias && !status.email.is_empty() {
+        acc.alias = status.email.clone();
+        acc.auto_alias = false;
+      }
+      save_store_atomic(&locked.store_path, &locked.store)?;
+      locked
+        .warm_pool
+        .get(&key)
+        .map(|e| e.webview_label.clone())
+    };
+    if let Some(label) = warm_label {
+      if let Some(wv) = app.get_webview(&label) {
+        let _ = wv.eval(&glados_cookie_reset_script(&cookie, &domain));
+      }
+    }
+    let snap = {
+      let locked = self.inner.lock().await;
+      Self::snapshot_from_locked(&locked)
+    };
+    self.emit_snapshot(app, &snap);
+    Ok(snap)
   }
 
   pub async fn remove_account(
@@ -2491,6 +2982,13 @@ impl SessionManager {
         mgr_ta.sync_teleagent_points(&app_ta, force).await;
       });
     }
+    {
+      let mgr_gd = Arc::clone(self);
+      let app_gd = app.clone();
+      tauri::async_runtime::spawn(async move {
+        mgr_gd.sync_glados_status(&app_gd, force).await;
+      });
+    }
 
     #[cfg(desktop)]
     {
@@ -2649,6 +3147,8 @@ impl SessionManager {
         alive_flag,
         proxy_url,
         account.teleagent_token.clone(),
+        account.gd_cookie.clone(),
+        account.gd_domain.clone(),
       );
       let main_win = app.get_window("main").ok_or_else(|| "主窗口不存在".to_string())?;
       let (init_pos, init_size) = Self::initial_hidden_child_rect(&main_win);
@@ -2658,11 +3158,7 @@ impl SessionManager {
       let _ = created_wv.hide();
       platform::verify_desktop_profile_binding(&created_wv, parsed_uuid, &profile_dir).await?;
 
-      let entry_url: Url = get_provider(account.provider_id)
-        .info
-        .entry_url
-        .parse()
-        .map_err(|e| format!("服务入口地址错误: {e}"))?;
+      let entry_url: Url = entry_url_for(&account);
       let _ = created_wv.navigate(entry_url);
 
       // 等页面就绪（最多约 9 秒），随后触发后端额度刷新并读取探测结果。
@@ -2947,10 +3443,18 @@ impl SessionManager {
     alive_flag: Arc<AtomicBool>,
     proxy_url: Option<Url>,
     teleagent_token: String,
+    gd_cookie: String,
+    gd_domain: String,
   ) -> tauri::webview::WebviewBuilder<tauri::Wry> {
     // TeleAgent 视图：在页面脚本运行前种下 operationToken cookie（免登录）。
     let ta_init_script = if key.provider_id == ProviderId::TeleAgent {
       teleagent_cookie_script(&teleagent_token)
+    } else {
+      "void 0;".to_string()
+    };
+    // GLaDOS 视图：同样在页面脚本运行前种下整行 Cookie。
+    let gd_init_script = if key.provider_id == ProviderId::Glados {
+      glados_cookie_script(&gd_cookie, &gd_domain)
     } else {
       "void 0;".to_string()
     };
@@ -2983,6 +3487,7 @@ impl SessionManager {
     .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
     .initialization_script(LOGIN_CAPTURE_INIT_JS)
     .initialization_script(&ta_init_script)
+    .initialization_script(&gd_init_script)
     .on_navigation(move |url| {
       if !alive_nav.load(Ordering::SeqCst) {
         return false;
@@ -3238,6 +3743,8 @@ impl SessionManager {
       Arc::clone(&alive_flag),
       proxy_url,
       account.teleagent_token.clone(),
+      account.gd_cookie.clone(),
+      account.gd_domain.clone(),
     );
 
     let (init_pos, init_size) = Self::initial_hidden_child_rect(&main_win);
@@ -3279,11 +3786,7 @@ impl SessionManager {
       return Ok(self.get_snapshot().await);
     }
 
-    let entry_url: Url = get_provider(account.provider_id)
-      .info
-      .entry_url
-      .parse()
-      .map_err(|e| format!("服务入口地址错误: {e}"))?;
+    let entry_url: Url = entry_url_for(&account);
 
     if let Err(nav_err) = created_wv.navigate(entry_url) {
       alive_flag.store(false, Ordering::SeqCst);
@@ -3571,6 +4074,8 @@ impl SessionManager {
       Arc::clone(&alive_flag),
       proxy_url,
       account.teleagent_token.clone(),
+      account.gd_cookie.clone(),
+      account.gd_domain.clone(),
     );
 
     let sync_res = (|| {
@@ -3614,11 +4119,7 @@ impl SessionManager {
       return Ok(());
     }
 
-    let entry_url: Url = get_provider(account.provider_id)
-      .info
-      .entry_url
-      .parse()
-      .map_err(|e| format!("服务入口地址错误: {e}"))?;
+    let entry_url: Url = entry_url_for(&account);
 
     if let Some(wv) = app.get_webview(&webview_label) {
       let _ = wv.navigate(entry_url);
@@ -4104,7 +4605,7 @@ impl SessionManager {
             !c.is_empty() && c != "额度充足" && c != "正在同步额度…"
           })
           .unwrap_or(false);
-      if key.provider_id != ProviderId::TeleAgent {
+      if key.provider_id != ProviderId::TeleAgent && key.provider_id != ProviderId::Glados {
         if got_quota {
           locked.quota_miss.remove(&key);
         } else {

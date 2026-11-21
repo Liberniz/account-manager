@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-glados-cookie"
+description = "Enables the update_glados_cookie command without any pre-configured scope."
+commands.allow = ["update_glados_cookie"]
+
+[[permission]]
+identifier = "deny-update-glados-cookie"
+description = "Denies the update_glados_cookie command without any pre-configured scope."
+commands.deny = ["update_glados_cookie"]

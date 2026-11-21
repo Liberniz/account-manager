@@ -401,6 +401,10 @@ body,
   background: #e1f0fa;
   color: #0072bc;
 }
+.avatar.glados {
+  background: #fdeeda;
+  color: #d97a06;
+}
 
 .provider-switch {
   display: flex;

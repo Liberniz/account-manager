@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-add-glados-account"
+description = "Enables the add_glados_account command without any pre-configured scope."
+commands.allow = ["add_glados_account"]
+
+[[permission]]
+identifier = "deny-add-glados-account"
+description = "Denies the add_glados_account command without any pre-configured scope."
+commands.deny = ["add_glados_account"]

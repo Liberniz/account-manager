@@ -92,6 +92,30 @@ async fn add_teleagent_account(
 }
 
 #[tauri::command]
+async fn add_glados_account(
+  app: AppHandle,
+  manager: State<'_, Arc<SessionManager>>,
+  domain: String,
+  cookie: String,
+) -> Result<ManagerSnapshot, String> {
+  manager
+    .add_glados_account(&app, &domain, &cookie)
+    .await
+}
+
+#[tauri::command]
+async fn update_glados_cookie(
+  app: AppHandle,
+  manager: State<'_, Arc<SessionManager>>,
+  uuid: String,
+  cookie: String,
+) -> Result<ManagerSnapshot, String> {
+  manager
+    .update_glados_cookie(&app, &uuid, &cookie)
+    .await
+}
+
+#[tauri::command]
 async fn update_teleagent_token(
   app: AppHandle,
   mgr: State<'_, Arc<SessionManager>>,
@@ -361,6 +385,8 @@ pub fn run() {
       reorder_accounts,
       add_teleagent_account,
       update_teleagent_token,
+      add_glados_account,
+      update_glados_cookie,
       retry_account_view,
       refresh_all_quotas,
       remove_account,

@@ -47,7 +47,7 @@ pub enum AuthState {
   LoggedOut,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountRecord {
   pub provider_id: ProviderId,
@@ -107,6 +107,27 @@ pub struct AccountRecord {
   /// TeleAgent 积分拉取失败原因（如「token 已失效」），空串表示无错误。
   #[serde(default)]
   pub ta_points_error: String,
+  /// GLaDOS 整行 Cookie（登录凭证，仅落盘；快照副本恒为空，不下发界面）。
+  #[serde(default)]
+  pub gd_cookie: String,
+  /// GLaDOS 登录站点域名（会话按域名隔离，如 glados.cloud）。
+  #[serde(default)]
+  pub gd_domain: String,
+  /// GLaDOS 剩余天数（/api/user/status 的 leftDays，可为小数/负数）。
+  #[serde(default)]
+  pub gd_left_days: Option<f64>,
+  /// GLaDOS 当前积分（/api/user/points）。
+  #[serde(default)]
+  pub gd_points: Option<u64>,
+  /// GLaDOS 连续签到天数。
+  #[serde(default)]
+  pub gd_streak: Option<u64>,
+  /// GLaDOS 状态拉取时间（毫秒）。
+  #[serde(default)]
+  pub gd_synced_at_ms: Option<u64>,
+  /// GLaDOS 状态拉取失败原因（如「Cookie 已失效」），空串表示无错误。
+  #[serde(default)]
+  pub gd_error: String,
 }
 
 /// 主窗口几何（逻辑像素的位置与尺寸），用于重启后恢复窗口大小/位置。
@@ -119,7 +140,7 @@ pub struct WindowGeometry {
   pub height: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConflictItem {
   pub uuid: String,
@@ -410,6 +431,40 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
         ta_points_error: item_obj
           .get("taPointsError")
           .or_else(|| item_obj.get("ta_points_error"))
+          .and_then(|v| v.as_str())
+          .unwrap_or("")
+          .to_string(),
+        gd_cookie: item_obj
+          .get("gdCookie")
+          .or_else(|| item_obj.get("gd_cookie"))
+          .and_then(|v| v.as_str())
+          .unwrap_or("")
+          .to_string(),
+        gd_domain: item_obj
+          .get("gdDomain")
+          .or_else(|| item_obj.get("gd_domain"))
+          .and_then(|v| v.as_str())
+          .unwrap_or("")
+          .to_string(),
+        gd_left_days: item_obj
+          .get("gdLeftDays")
+          .or_else(|| item_obj.get("gd_left_days"))
+          .and_then(|v| v.as_f64()),
+        gd_points: item_obj
+          .get("gdPoints")
+          .or_else(|| item_obj.get("gd_points"))
+          .and_then(|v| v.as_u64()),
+        gd_streak: item_obj
+          .get("gdStreak")
+          .or_else(|| item_obj.get("gd_streak"))
+          .and_then(|v| v.as_u64()),
+        gd_synced_at_ms: item_obj
+          .get("gdSyncedAtMs")
+          .or_else(|| item_obj.get("gd_synced_at_ms"))
+          .and_then(|v| v.as_u64()),
+        gd_error: item_obj
+          .get("gdError")
+          .or_else(|| item_obj.get("gd_error"))
           .and_then(|v| v.as_str())
           .unwrap_or("")
           .to_string(),

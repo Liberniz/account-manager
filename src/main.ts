@@ -18,6 +18,8 @@ type ModalMode =
   | { kind: "add"; providerId: ProviderId; draft: string }
   | { kind: "add-teleagent"; tokenDraft: string; deviceDraft: string }
   | { kind: "update-teleagent"; account: AccountRecord; tokenDraft: string; deviceDraft: string }
+  | { kind: "add-glados"; domainDraft: string; cookieDraft: string }
+  | { kind: "update-glados"; account: AccountRecord; cookieDraft: string }
   | { kind: "rename"; account: AccountRecord; draft: string; noteDraft: string }
   | { kind: "remove"; account: AccountRecord }
   | { kind: "proxy"; draft: string; warmLimit: string; followSystem: boolean }
@@ -26,7 +28,16 @@ type ModalMode =
 const PROVIDER_LOGOS: Record<ProviderId, { src: string; fullBleed: boolean }> = {
   muse: { src: "/logos/muse.png", fullBleed: true },
   teleagent: { src: "/logos/teleagent.svg", fullBleed: true },
+  glados: { src: "/logos/glados.svg", fullBleed: true },
 };
+
+const GLADOS_DOMAINS = [
+  "glados.cloud",
+  "glados.one",
+  "glados.rocks",
+  "glados-facility.com",
+  "railgun.info",
+];
 
 const ICON_EXTERNAL = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`;
 const ICON_REFRESH = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>`;
@@ -67,6 +78,7 @@ const updateState: {
 const scrollOffsets: Record<ProviderId, number> = {
   muse: 0,
   teleagent: 0,
+  glados: 0,
 };
 
 function isSameKey(a: AccountKey | null, b: AccountRecord): boolean {
@@ -664,6 +676,51 @@ function renderModal(provider: ProviderInfo): string {
       </div>
     `;
   }
+  if (modal.kind === "add-glados") {
+    const currentDomain = modal.domainDraft;
+    const domainOptions = GLADOS_DOMAINS.map(
+      (d) =>
+        `<option value="${d}" ${d === currentDomain ? "selected" : ""}>${d}</option>`,
+    ).join("");
+    return `
+      <div class="inline-modal" role="dialog" aria-modal="true">
+        <div class="modal-card">
+          <div class="modal-title">新增 GLaDOS 账号</div>
+          <div class="modal-desc">不走网页登录：选账号所在站点，粘贴整行 Cookie，叠号会先验活再保存、并把 Cookie 种入该账号的隔离视图直接进入控制台。签到请在右侧控制台页面里点（站点有人机验证，接口代签拿不到满分）。Cookie 只存本机。</div>
+          <div class="modal-desc" style="margin-bottom:6px;">站点域名（账号在哪个站点注册就选哪个）：</div>
+          <select id="modal-domain-select" class="modal-input">${domainOptions}</select>
+          <div class="modal-desc" style="margin-top:14px; margin-bottom:6px;">Cookie 整行：在该站点登录后按 F12 → Network（网络）→ 点任一请求 → 在请求头里复制 Cookie 整行。必须包含 gld:sess 与 gld:sess.sig。</div>
+          <textarea id="modal-cookie-input" class="modal-input modal-textarea" rows="4" placeholder="粘贴 Cookie 整行">${escapeHtml(modal.cookieDraft)}</textarea>
+          <div class="modal-footer">
+            <button id="modal-cancel-btn" class="btn" type="button">取消</button>
+            <button id="modal-confirm-btn" class="btn primary" type="button">验证并添加</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  if (modal.kind === "update-glados") {
+    const d = modal.account.gdLeftDays;
+    const statusText =
+      typeof d === "number"
+        ? d > 0
+          ? `当前剩余 ${Math.floor(d)} 天（${escapeHtml(modal.account.gdDomain)}）`
+          : `当前已过期（${escapeHtml(modal.account.gdDomain)}）`
+        : `站点：${escapeHtml(modal.account.gdDomain)}`;
+    return `
+      <div class="inline-modal" role="dialog" aria-modal="true">
+        <div class="modal-card">
+          <div class="modal-title">更新 Cookie · ${escapeHtml(modal.account.alias)}</div>
+          <div class="modal-desc">${statusText}。在该站点重新登录后，按 F12 → Network → 任一请求 → 复制 Cookie 整行粘贴到这里；保存前会先验活，视图会自动刷新为新登录态。</div>
+          <textarea id="modal-cookie-input" class="modal-input modal-textarea" rows="4" placeholder="粘贴新的 Cookie 整行">${escapeHtml(modal.cookieDraft)}</textarea>
+          <div class="modal-footer">
+            <button id="modal-cancel-btn" class="btn" type="button">取消</button>
+            <button id="modal-confirm-btn" class="btn primary" type="button">验证并保存</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
   if (modal.kind === "proxy") {
     return `
       <div class="inline-modal" role="dialog" aria-modal="true">
@@ -814,7 +871,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
       <div class="empty-list">
         <div class="empty-icon-circle">${ICON_USER_PLUS}</div>
         <div>暂无 ${escapeHtml(provider.shortName)} 账号</div>
-        <div>${provider.id === "teleagent" ? "点击右上角「+ 新增」粘贴 operationToken 添加" : "点击右上角「+ 新增」创建独立登录环境"}</div>
+        <div>${provider.id === "teleagent" ? "点击右上角「+ 新增」粘贴 operationToken 添加" : provider.id === "glados" ? "点击右上角「+ 新增」粘贴 Cookie 添加" : "点击右上角「+ 新增」创建独立登录环境"}</div>
       </div>
     `;
   } else {
@@ -825,6 +882,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
         const avatarText = computeAvatarText(acc);
         const isLoggedOut = acc.authState === "logged_out";
         const isTeleagent = acc.providerId === "teleagent";
+        const isGlados = acc.providerId === "glados";
         const hasDetail = !isLoggedOut && Boolean(acc.quotaDetail);
 
         const quotaState = isLoggedOut
@@ -855,8 +913,15 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
           isTeleagent &&
           typeof acc.tokenExpiresAtMs === "number" &&
           acc.tokenExpiresAtMs <= Date.now();
+        const gladosExpired =
+          isGlados &&
+          !isLoggedOut &&
+          typeof acc.gdLeftDays === "number" &&
+          acc.gdLeftDays <= 0;
         const alertBadgeHtml = tokenExpired
           ? `<span class="quota-warning-badge critical">token 已失效</span>`
+          : gladosExpired
+            ? `<span class="quota-warning-badge critical">已过期</span>`
           : isLoggedOut
             ? `<span class="auth-status-badge">未登录</span>`
             : acc.quotaStale
@@ -878,6 +943,39 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
         let compactSubHtml = "";
         if (switching && !hasDetail) {
           compactSubHtml = `<div class="account-sub loading-text"><span class="quota-label-text">正在加载…</span></div>`;
+        } else if (isGlados) {
+          if (isLoggedOut) {
+            compactSubHtml = `<div class="account-sub auth-logged-out"><span class="auth-dot-inline"></span><span class="quota-label-text">Cookie 已失效，点行尾钥匙按钮更新</span></div>`;
+          } else {
+            const d = acc.gdLeftDays;
+            let daysLine: string;
+            let daysClass = "account-sub";
+            if (typeof d !== "number") {
+              daysLine = "状态同步中…";
+            } else if (d > 1) {
+              daysLine = `剩余 ${Math.floor(d)} 天 · ${fmtDateMs(Date.now() + d * 86_400_000)} 到期`;
+              if (d <= 5) daysClass = "account-sub quota-low";
+            } else if (d > 0) {
+              daysLine = `剩余不足 1 天 · 今天到期`;
+              daysClass = "account-sub quota-low";
+            } else {
+              daysLine = `已过期 ${Math.ceil(-d)} 天 · ${fmtDateMs(Date.now() + d * 86_400_000)} 已到期`;
+              daysClass = "account-sub quota-empty";
+            }
+            let pointsLine: string;
+            let pointsClass = "account-sub";
+            if (acc.gdError) {
+              pointsLine = acc.gdError;
+              pointsClass = "account-sub quota-empty";
+            } else if (typeof acc.gdPoints === "number") {
+              pointsLine = `${acc.gdPoints.toLocaleString()} 积分 · 连签 ${acc.gdStreak ?? 0} 天 · ${acc.gdDomain}`;
+            } else if (typeof acc.gdSyncedAtMs === "number") {
+              pointsLine = acc.gdDomain;
+            } else {
+              pointsLine = "状态同步中…";
+            }
+            compactSubHtml = `<div class="${daysClass}"><span class="quota-label-text">${escapeHtml(daysLine)}</span></div><div class="${pointsClass}"><span class="quota-label-text">${escapeHtml(pointsLine)}</span></div>`;
+          }
         } else if (isTeleagent) {
           if (isLoggedOut) {
             compactSubHtml = `<div class="account-sub auth-logged-out"><span class="auth-dot-inline"></span><span class="quota-label-text">token 已失效，点行尾钥匙按钮更新</span></div>`;
@@ -983,6 +1081,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
               <div class="row-ops">
                 ${acc.viewError && !isLoggedOut ? `<button class="action-icon-btn" data-retry-uuid="${escapeHtml(acc.uuid)}" title="视图预热失败，点此重试" type="button">${ICON_REFRESH}</button>` : ""}
                 ${isTeleagent ? `<button class="action-icon-btn" data-update-token-uuid="${escapeHtml(acc.uuid)}" title="更新 operationToken" type="button">${ICON_KEY}</button>` : ""}
+                ${isGlados ? `<button class="action-icon-btn" data-update-cookie-uuid="${escapeHtml(acc.uuid)}" title="更新 Cookie" type="button">${ICON_KEY}</button>` : ""}
                 <button class="action-icon-btn" data-browser-uuid="${escapeHtml(acc.uuid)}" title="在默认浏览器打开官网（独立会话，作备用入口）" type="button">${ICON_EXTERNAL}</button>
                 <button class="action-icon-btn" data-rename-uuid="${escapeHtml(acc.uuid)}" title="修改备注" type="button">${ICON_EDIT}</button>
                 <button class="action-icon-btn danger" data-remove-uuid="${escapeHtml(acc.uuid)}" title="从本机移除" type="button">${ICON_TRASH}</button>
@@ -1135,6 +1234,8 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
   const openAddModal = async () => {
     if (provider.id === "teleagent") {
       await setModal({ kind: "add-teleagent", tokenDraft: "", deviceDraft: "" });
+    } else if (provider.id === "glados") {
+      await setModal({ kind: "add-glados", domainDraft: "glados.cloud", cookieDraft: "" });
     } else {
       await setModal({ kind: "add", providerId: provider.id, draft: "" });
     }
@@ -1322,6 +1423,21 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     });
   });
 
+  document.querySelectorAll<HTMLElement>("[data-update-cookie-uuid]").forEach((btn) => {
+    btn.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      const uuid = btn.dataset.updateCookieUuid;
+      const acc = state.accounts.find((a) => a.providerId === provider.id && a.uuid === uuid);
+      if (acc) {
+        await setModal({
+          kind: "update-glados",
+          account: acc,
+          cookieDraft: "",
+        });
+      }
+    });
+  });
+
   document.querySelectorAll<HTMLElement>("[data-rename-uuid]").forEach((btn) => {
     btn.addEventListener("click", async (ev) => {
       ev.stopPropagation();
@@ -1405,6 +1521,20 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     }
   });
 
+  const cookieInput = document.querySelector<HTMLTextAreaElement>("#modal-cookie-input");
+  cookieInput?.addEventListener("input", () => {
+    if (modal.kind === "add-glados" || modal.kind === "update-glados") {
+      modal.cookieDraft = cookieInput.value;
+    }
+  });
+
+  const domainSelect = document.querySelector<HTMLSelectElement>("#modal-domain-select");
+  domainSelect?.addEventListener("change", () => {
+    if (modal.kind === "add-glados") {
+      modal.domainDraft = domainSelect.value;
+    }
+  });
+
   const deviceInput = document.querySelector<HTMLInputElement>("#modal-device-input");
   deviceInput?.addEventListener("input", () => {
     if (modal.kind === "add-teleagent" || modal.kind === "update-teleagent") {
@@ -1473,6 +1603,19 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
       const uuid = currentModal.account.uuid;
       await setModal({ kind: "none" });
       await callCommand("update_teleagent_token", { uuid, token, deviceId });
+    } else if (currentModal.kind === "add-glados") {
+      const cookie = currentModal.cookieDraft.trim();
+      if (!cookie) return;
+      const domainSel = document.querySelector<HTMLSelectElement>("#modal-domain-select");
+      const domain = domainSel ? domainSel.value : currentModal.domainDraft;
+      await setModal({ kind: "none" });
+      await callCommand("add_glados_account", { domain, cookie });
+    } else if (currentModal.kind === "update-glados") {
+      const cookie = currentModal.cookieDraft.trim();
+      if (!cookie) return;
+      const uuid = currentModal.account.uuid;
+      await setModal({ kind: "none" });
+      await callCommand("update_glados_cookie", { uuid, cookie });
     } else if (currentModal.kind === "remove") {
       await setModal({ kind: "none" });
       await callCommand("remove_account", {

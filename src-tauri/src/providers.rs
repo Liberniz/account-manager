@@ -6,6 +6,7 @@ use url::Url;
 pub enum ProviderId {
   Muse,
   TeleAgent,
+  Glados,
 }
 
 impl ProviderId {
@@ -13,6 +14,7 @@ impl ProviderId {
     match self {
       ProviderId::Muse => "muse",
       ProviderId::TeleAgent => "teleagent",
+      ProviderId::Glados => "glados",
     }
   }
 
@@ -20,6 +22,7 @@ impl ProviderId {
     match value.trim().to_ascii_lowercase().as_str() {
       "muse" => Some(ProviderId::Muse),
       "teleagent" => Some(ProviderId::TeleAgent),
+      "glados" => Some(ProviderId::Glados),
       _ => None,
     }
   }
@@ -82,6 +85,33 @@ pub const PROVIDERS: &[ProviderSpec] = &[
     },
     // host_matches 带子域名匹配：teleai.com.cn 覆盖 agent/cdn-ta/www 等子域。
     allowed_hosts: &["teleai.com.cn"],
+  },
+  ProviderSpec {
+    info: ProviderInfo {
+      id: ProviderId::Glados,
+      name: "GLaDOS",
+      short_name: "GLaDOS",
+      enabled: true,
+      status_text: "已启用",
+      entry_url: "https://glados.cloud/console",
+      homepage_url: "https://glados.cloud",
+      callback_origins: &[
+        "https://glados.cloud",
+        "https://glados.one",
+        "https://glados.rocks",
+        "https://glados-facility.com",
+        "https://railgun.info",
+      ],
+      verified_methods: &["cookie"],
+    },
+    // GLaDOS 系站点（会话按域名隔离，账号各自记录登录域名）。
+    allowed_hosts: &[
+      "glados.cloud",
+      "glados.one",
+      "glados.rocks",
+      "glados-facility.com",
+      "railgun.info",
+    ],
   },
 ];
 
