@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 pub const APP_TITLE: &str = "叠号";
 #[cfg(desktop)]
-const LEFT_PANE_WIDTH: f64 = 380.0;
+const LEFT_PANE_WIDTH: f64 = 312.0; // 账号列宽度（v0.3.0 删除左侧栏后 = 中列 312，勿再加 rail 的 68）
 #[cfg(desktop)]
 const DEFAULT_WARM_DESKTOP_VIEWS: usize = 6;
 
