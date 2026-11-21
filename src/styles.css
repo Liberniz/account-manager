@@ -225,53 +225,10 @@ body,
   position: relative;
 }
 
-.mobile-shell {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100%;
-  background: var(--list-bg);
-  padding-top: max(env(safe-area-inset-top, 0px), 32px);
-  padding-bottom: env(safe-area-inset-bottom, 0px);
-}
 
-.mobile-tabs {
-  display: flex;
-  background: var(--rail-bg);
-  border-bottom: 1px solid var(--border);
-  padding: 8px 10px;
-  gap: 6px;
-}
 
-.mobile-tab {
-  flex: 1;
-  padding: 7px 6px;
-  border-radius: 9px;
-  border: 1px solid transparent;
-  background: transparent;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-sub);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-}
 
-.mobile-tab.active {
-  background: #ffffff;
-  color: var(--primary);
-  border-color: var(--border);
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-}
 
-.mobile-tab-logo {
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
-  object-fit: contain;
-}
 
 .column-header {
   height: 56px;
@@ -576,10 +533,6 @@ body,
   color: #0064e0;
 }
 
-.avatar.hark {
-  background: #eef2ff;
-  color: #4338ca;
-}
 
 .avatar.pending-identity {
   background: #f1f5f9;
@@ -1184,20 +1137,8 @@ body,
   animation: maam-progress 1.1s ease-in-out infinite;
 }
 
-.mobile-shell .account-list {
-  padding: 10px 12px 24px;
-  gap: 8px;
-}
 
-.mobile-shell .account-row {
-  padding: 9px 12px;
-  gap: 6px;
-}
 
-.mobile-shell .action-icon-btn {
-  width: 30px;
-  height: 30px;
-}
 
 .rail-footer {
   margin-top: auto;
@@ -1442,4 +1383,70 @@ body,
   min-width: 6px;
   border-radius: 999px;
   background: #f59e0b;
+}
+
+.quota-overview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 14px 10px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #eef4ff;
+  color: #1e3a5f;
+  font-size: 12.5px;
+}
+
+.quota-overview.depleted {
+  background: #fdecec;
+  color: #7f1d1d;
+  font-weight: 600;
+}
+
+.overview-switch-btn {
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.modal-check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: #475569;
+  cursor: pointer;
+}
+
+.modal-check-row input {
+  margin-top: 2px;
+}
+
+.account-search-row {
+  margin: 0 14px 10px;
+}
+
+.account-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 11px;
+  border: 1px solid #dbe3ee;
+  border-radius: 9px;
+  font-size: 13px;
+  outline: none;
+}
+
+.account-search:focus {
+  border-color: #7aa5e8;
+}
+
+.quota-warning-badge.stale {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.quota-sync-note {
+  opacity: 0.75;
+  font-size: 11px;
 }

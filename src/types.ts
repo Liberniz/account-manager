@@ -1,4 +1,4 @@
-export type ProviderId = "muse" | "hark";
+export type ProviderId = "muse";
 export type AuthState = "unknown" | "authenticated" | "logged_out";
 
 export interface AccountKey {
@@ -40,6 +40,8 @@ export interface AccountRecord {
   quotaPercent: number | null;
   quotaDetail: QuotaDetail | null;
   authState: AuthState;
+  quotaSyncedAtMs: number | null;
+  quotaStale: boolean;
 }
 
 export interface ConflictItem {
@@ -61,6 +63,8 @@ export interface ManagerSnapshot {
   notice: string | null;
   modalActive: boolean;
   proxyUrl: string | null;
+  warmViewLimit: number | null;
+  proxyFollowSystem: boolean;
 }
 
 export interface UpdateCheckResult {

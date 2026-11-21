@@ -5,21 +5,18 @@ use url::Url;
 #[serde(rename_all = "lowercase")]
 pub enum ProviderId {
   Muse,
-  Hark,
 }
 
 impl ProviderId {
   pub fn as_str(self) -> &'static str {
     match self {
       ProviderId::Muse => "muse",
-      ProviderId::Hark => "hark",
     }
   }
 
   pub fn parse(value: &str) -> Option<Self> {
     match value.trim().to_ascii_lowercase().as_str() {
       "muse" => Some(ProviderId::Muse),
-      "hark" => Some(ProviderId::Hark),
       _ => None,
     }
   }
@@ -64,25 +61,6 @@ pub const PROVIDERS: &[ProviderSpec] = &[
       "facebook.com",
       "instagram.com",
       "fb.com",
-      "appleid.apple.com",
-      "idmsa.apple.com",
-    ],
-  },
-  ProviderSpec {
-    info: ProviderInfo {
-      id: ProviderId::Hark,
-      name: "Hark",
-      short_name: "Hark",
-      enabled: true,
-      status_text: "已启用",
-      entry_url: "https://app.hark.com/",
-      homepage_url: "https://hark.com/",
-      callback_origins: &["https://app.hark.com", "https://hark.com"],
-      verified_methods: &["email", "phone", "apple"],
-    },
-    allowed_hosts: &[
-      "app.hark.com",
-      "hark.com",
       "appleid.apple.com",
       "idmsa.apple.com",
     ],

@@ -18,6 +18,8 @@
     "allow-resolve-uuid-conflict",
     "allow-dismiss-notice",
     "allow-set-proxy-url",
+    "allow-set-warm-view-limit",
+    "allow-set-proxy-follow-system",
     "allow-trigger-quota-sync",
     "allow-check-for-updates",
     "allow-download-and-install-update",

@@ -106,6 +106,24 @@ async fn set_proxy_url(
 }
 
 #[tauri::command]
+async fn set_proxy_follow_system(
+  app: AppHandle,
+  mgr: State<'_, Arc<SessionManager>>,
+  enabled: bool,
+) -> Result<ManagerSnapshot, String> {
+  mgr.set_proxy_follow_system(&app, enabled).await
+}
+
+#[tauri::command]
+async fn set_warm_view_limit(
+  app: AppHandle,
+  mgr: State<'_, Arc<SessionManager>>,
+  limit: Option<u32>,
+) -> Result<ManagerSnapshot, String> {
+  mgr.set_warm_view_limit(&app, limit).await
+}
+
+#[tauri::command]
 async fn trigger_quota_sync(
   app: AppHandle,
   mgr: State<'_, Arc<SessionManager>>,
@@ -132,20 +150,52 @@ async fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
   updater::open_external_url(&app, &url).await
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-  let builder = tauri::Builder::default();
-
-  #[cfg(target_os = "android")]
-  let builder = builder.plugin(platform::android::init());
-
-  builder
+  tauri::Builder::default()
     .setup(|app| {
       let app_data_dir = app.path().app_data_dir()?;
       let session_mgr = Arc::new(SessionManager::new(app_data_dir));
       app.manage(Arc::clone(&session_mgr));
 
-      #[cfg(desktop)]
+      // 菜单栏常驻图标：菜单含账号列表（点击直接切换），内容随状态快照刷新。
+      {
+        use tauri::menu::{Menu, MenuItem};
+        use tauri::tray::TrayIconBuilder;
+        let show_item = MenuItem::with_id(app, "tray-show", "显示叠号", true, None::<&str>)?;
+        let quit_item = MenuItem::with_id(app, "tray-quit", "退出叠号", true, None::<&str>)?;
+        let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+        let mut tray_builder = TrayIconBuilder::with_id("main-tray")
+          .menu(&menu)
+          .show_menu_on_left_click(true)
+          .tooltip("叠号")
+          .on_menu_event(|app, event| {
+            let id = event.id.as_ref();
+            if id == "tray-show" {
+              if let Some(win) = app.get_window("main") {
+                let _ = win.show();
+                let _ = win.set_focus();
+              }
+            } else if id == "tray-quit" {
+              app.exit(0);
+            } else if let Some(uuid) = id.strip_prefix("tray-acc:") {
+              let app_handle = app.clone();
+              let uuid = uuid.to_string();
+              tauri::async_runtime::spawn(async move {
+                if let Some(win) = app_handle.get_window("main") {
+                  let _ = win.show();
+                  let _ = win.set_focus();
+                }
+                let mgr = app_handle.state::<Arc<SessionManager>>();
+                let _ = mgr.switch_account(&app_handle, "muse", &uuid).await;
+              });
+            }
+          });
+        if let Some(icon) = app.default_window_icon() {
+          tray_builder = tray_builder.icon(icon.clone());
+        }
+        tray_builder.build(app)?;
+      }
+
       {
         let main_window = tauri::window::WindowBuilder::new(app, "main")
           .title(APP_TITLE)
@@ -188,21 +238,17 @@ pub fn run() {
         });
       }
 
-      #[cfg(mobile)]
-      {
-        let _ = APP_TITLE;
-        tauri::WebviewWindowBuilder::new(
-          app,
-          "manager",
-          tauri::WebviewUrl::App("index.html".into()),
-        )
-        .build()?;
-      }
-
       let app_for_boot = app.handle().clone();
       let mgr_for_boot = Arc::clone(&session_mgr);
       tauri::async_runtime::spawn(async move {
         mgr_for_boot.run_startup_tasks(&app_for_boot).await;
+      });
+
+      let app_for_tray = app.handle().clone();
+      let mgr_for_tray = Arc::clone(&session_mgr);
+      tauri::async_runtime::spawn(async move {
+        let snap = mgr_for_tray.get_snapshot().await;
+        SessionManager::refresh_tray_menu(&app_for_tray, &snap);
       });
 
       Ok(())
@@ -219,6 +265,8 @@ pub fn run() {
       resolve_uuid_conflict,
       dismiss_notice,
       set_proxy_url,
+      set_warm_view_limit,
+      set_proxy_follow_system,
       trigger_quota_sync,
       check_for_updates,
       download_and_install_update,

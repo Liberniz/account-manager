@@ -66,6 +66,10 @@ pub struct AccountRecord {
   pub quota_detail: Option<QuotaDetail>,
   #[serde(default)]
   pub auth_state: AuthState,
+  #[serde(default)]
+  pub quota_synced_at_ms: Option<u64>,
+  #[serde(default)]
+  pub quota_stale: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +88,10 @@ pub struct AccountsStoreFile {
   pub pending_cleanup: Vec<AccountKey>,
   #[serde(default)]
   pub proxy_url: Option<String>,
+  #[serde(default)]
+  pub warm_view_limit: Option<u32>,
+  #[serde(default)]
+  pub proxy_follow_system: bool,
 }
 
 impl Default for AccountsStoreFile {
@@ -94,6 +102,8 @@ impl Default for AccountsStoreFile {
       last_committed: None,
       pending_cleanup: Vec::new(),
       proxy_url: None,
+      warm_view_limit: None,
+      proxy_follow_system: false,
     }
   }
 }
@@ -223,7 +233,11 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
       let provider_id = match item_obj.get("providerId").or_else(|| item_obj.get("provider_id")) {
         Some(v) => {
           let s = v.as_str().ok_or_else(|| "providerId 非法".to_string())?;
-          ProviderId::parse(s).ok_or_else(|| format!("未知服务标识: {s}"))?
+          // 已下线服务（如 Hark）的账号直接跳过，不让整份配置加载失败
+          match ProviderId::parse(s) {
+            Some(parsed) => parsed,
+            None => continue,
+          }
         }
         None if is_legacy => ProviderId::Muse,
         None => return Err("新版配置账号缺少 providerId".to_string()),
@@ -294,6 +308,11 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
         quota_percent,
         quota_detail,
         auth_state,
+        quota_synced_at_ms: item_obj
+          .get("quotaSyncedAtMs")
+          .or_else(|| item_obj.get("quota_synced_at_ms"))
+          .and_then(|v| v.as_u64()),
+        quota_stale: false,
       });
     }
   }
@@ -321,6 +340,18 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
     }
   }
 
+  let proxy_follow_system = obj
+    .get("proxyFollowSystem")
+    .or_else(|| obj.get("proxy_follow_system"))
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false);
+
+  let warm_view_limit = obj
+    .get("warmViewLimit")
+    .or_else(|| obj.get("warm_view_limit"))
+    .and_then(|v| v.as_u64())
+    .map(|v| v as u32);
+
   let proxy_url = obj
     .get("proxyUrl")
     .or_else(|| obj.get("proxy_url"))
@@ -335,6 +366,8 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
       last_committed,
       pending_cleanup,
       proxy_url,
+      warm_view_limit,
+      proxy_follow_system,
     },
     is_legacy,
   ))

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-warm-view-limit"
+description = "Enables the set_warm_view_limit command without any pre-configured scope."
+commands.allow = ["set_warm_view_limit"]
+
+[[permission]]
+identifier = "deny-set-warm-view-limit"
+description = "Denies the set_warm_view_limit command without any pre-configured scope."
+commands.deny = ["set_warm_view_limit"]

@@ -215,12 +215,7 @@ fn default_filename_for_platform(version: &str, url: &str) -> String {
     }
   }
   let ver = clean_version(version);
-  match crate::platform::current_platform_name() {
-    "macos" => format!("account-manager-{ver}-macos.app.tar.gz"),
-    "windows" => format!("account-manager-{ver}-windows-setup.exe"),
-    "android" => format!("account-manager-{ver}-android.apk"),
-    _ => format!("account-manager-{ver}.bin"),
-  }
+  format!("account-manager-{ver}-macos.app.tar.gz")
 }
 
 fn select_github_asset<'a>(assets: &'a [GithubAsset], platform: &str) -> Option<&'a GithubAsset> {
@@ -232,22 +227,6 @@ fn select_github_asset<'a>(assets: &'a [GithubAsset], platform: &str) -> Option<
         assets
           .iter()
           .find(|a| a.name.to_ascii_lowercase().ends_with(".dmg"))
-      }),
-    "windows" => assets
-      .iter()
-      .find(|a| a.name.to_ascii_lowercase().ends_with("-setup.exe"))
-      .or_else(|| {
-        assets
-          .iter()
-          .find(|a| a.name.to_ascii_lowercase().ends_with(".exe"))
-      }),
-    "android" => assets
-      .iter()
-      .find(|a| a.name.to_ascii_lowercase().ends_with("-release.apk"))
-      .or_else(|| {
-        assets
-          .iter()
-          .find(|a| a.name.to_ascii_lowercase().ends_with(".apk"))
       }),
     _ => None,
   }
@@ -271,20 +250,22 @@ fn extract_sha256_digest(raw: Option<&str>) -> Option<String> {
 }
 
 /// 读取已保存的代理设置（仅 macOS 生效），供更新检查/下载走同一代理。
-#[cfg(all(desktop, target_os = "macos"))]
 fn saved_proxy_url(app: &AppHandle) -> Option<String> {
   use tauri::Manager;
   let dir = app.path().app_data_dir().ok()?;
   let raw = std::fs::read_to_string(dir.join("accounts.json")).ok()?;
   let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+  let follow_system = value
+    .get("proxyFollowSystem")
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false);
+  if follow_system {
+    if let Some(sys) = crate::platform::resolve_system_proxy() {
+      return Some(sys);
+    }
+  }
   let proxy = value.get("proxyUrl").and_then(|v| v.as_str())?;
   crate::storage::normalize_proxy_url(proxy).ok().flatten()
-}
-
-#[cfg(all(desktop, not(target_os = "macos")))]
-fn saved_proxy_url(app: &AppHandle) -> Option<String> {
-  let _ = app;
-  None
 }
 
 #[cfg(desktop)]
@@ -336,11 +317,6 @@ async fn fetch_text_with_status(
     Ok((status, body))
   }
 
-  #[cfg(target_os = "android")]
-  {
-    let res = crate::platform::android::fetch_text(app, url, user_agent, accept).await?;
-    Ok((res.status, res.body))
-  }
 }
 
 pub async fn check_for_updates(app: &AppHandle) -> Result<UpdateCheckResult, String> {
@@ -799,50 +775,6 @@ fi"#;
   })
 }
 
-#[cfg(windows)]
-async fn install_windows_update(
-  app: &AppHandle,
-  dest_path: &std::path::Path,
-  downloaded: u64,
-) -> Result<InstallUpdateOutcome, String> {
-  let lower_name = dest_path
-    .file_name()
-    .and_then(|n| n.to_str())
-    .unwrap_or("")
-    .to_ascii_lowercase();
-  if !lower_name.ends_with(".exe") {
-    return Err("不支持的 Windows 安装包格式".to_string());
-  }
-
-  emit_progress(
-    app,
-    "installing",
-    downloaded,
-    Some(downloaded),
-    Some(100),
-    "正在启动安装程序...",
-  );
-
-  std::process::Command::new(dest_path)
-    .args(["/P", "/UPDATE", "/R"])
-    .spawn()
-    .map_err(|e| format!("启动安装程序失败: {e}"))?;
-
-  let msg = "已启动安装程序，正在退出并完成替换...";
-  emit_progress(app, "ready", downloaded, Some(downloaded), Some(100), msg);
-
-  let app_clone = app.clone();
-  tauri::async_runtime::spawn(async move {
-    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-    app_clone.exit(0);
-  });
-
-  Ok(InstallUpdateOutcome {
-    status: "restarting".to_string(),
-    message: msg.to_string(),
-  })
-}
-
 pub async fn download_and_install_update(
   app: &AppHandle,
   req: InstallUpdateRequest,
@@ -853,23 +785,6 @@ pub async fn download_and_install_update(
   let user_agent = format!("multi-agent-account-manager/{current_version}");
   let fallback_name = default_filename_for_platform(&req.version, validated_url.as_str());
   let filename = sanitize_filename(req.filename.as_deref(), &fallback_name);
-
-  #[cfg(target_os = "android")]
-  {
-    let sha = extract_sha256_digest(req.sha256.as_deref());
-    let res = crate::platform::android::download_and_install_apk(
-      app,
-      validated_url.as_str(),
-      sha.as_deref(),
-      &filename,
-      &user_agent,
-    )
-    .await?;
-    Ok(InstallUpdateOutcome {
-      status: res.status,
-      message: res.message,
-    })
-  }
 
   #[cfg(desktop)]
   {
@@ -889,7 +804,6 @@ pub async fn download_and_install_update(
       }
     };
 
-    #[cfg(target_os = "macos")]
     {
       match install_macos_update(app, &dest_path, downloaded).await {
         Ok(outcome) => Ok(outcome),
@@ -900,27 +814,6 @@ pub async fn download_and_install_update(
       }
     }
 
-    #[cfg(windows)]
-    {
-      match install_windows_update(app, &dest_path, downloaded).await {
-        Ok(outcome) => Ok(outcome),
-        Err(err) => {
-          emit_progress(app, "error", downloaded, Some(downloaded), None, &err);
-          Err(err)
-        }
-      }
-    }
-
-    #[cfg(all(not(target_os = "macos"), not(windows)))]
-    {
-      open::that_detached(&dest_path).map_err(|e| format!("打开更新文件失败: {e}"))?;
-      let msg = "已下载更新包并打开文件";
-      emit_progress(app, "ready", downloaded, Some(downloaded), Some(100), msg);
-      Ok(InstallUpdateOutcome {
-        status: "installer_launched".to_string(),
-        message: msg.to_string(),
-      })
-    }
   }
 }
 
@@ -930,14 +823,6 @@ pub async fn open_external_url(app: &AppHandle, raw_url: &str) -> Result<(), Str
     return Err("仅支持打开 HTTPS 链接".to_string());
   }
 
-  #[cfg(desktop)]
-  {
-    let _ = app;
-    crate::platform::open_external_browser(parsed.as_str())
-  }
-
-  #[cfg(target_os = "android")]
-  {
-    crate::platform::android::open_external_url(app, parsed.as_str()).await
-  }
+  let _ = app;
+  crate::platform::open_external_browser(parsed.as_str())
 }

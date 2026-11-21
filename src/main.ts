@@ -18,12 +18,11 @@ type ModalMode =
   | { kind: "add"; providerId: ProviderId; draft: string }
   | { kind: "rename"; account: AccountRecord; draft: string }
   | { kind: "remove"; account: AccountRecord }
-  | { kind: "proxy"; draft: string }
+  | { kind: "proxy"; draft: string; warmLimit: string; followSystem: boolean }
   | { kind: "update" };
 
 const PROVIDER_LOGOS: Record<ProviderId, { src: string; fullBleed: boolean }> = {
   muse: { src: "/logos/muse.png", fullBleed: true },
-  hark: { src: "/logos/hark.svg", fullBleed: false },
 };
 
 const ICON_EXTERNAL = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`;
@@ -37,6 +36,7 @@ const ICON_PROXY = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" 
 let snapshot: ManagerSnapshot | null = null;
 let modal: ModalMode = { kind: "none" };
 let optimisticSwitching: AccountKey | null = null;
+let accountSearchQuery = "";
 let busy = false;
 let lastRenderedUpdateStage: string | null = null;
 
@@ -60,7 +60,6 @@ const updateState: {
 
 const scrollOffsets: Record<ProviderId, number> = {
   muse: 0,
-  hark: 0,
 };
 
 function isSameKey(a: AccountKey | null, b: AccountRecord): boolean {
@@ -617,6 +616,19 @@ function renderModal(provider: ProviderInfo): string {
           <div class="modal-title">代理设置（macOS）</div>
           <div class="modal-desc">账号页面与应用内更新的流量将经此代理。支持 http:// 或 socks5://，需带端口，如 http://127.0.0.1:7890；暂不支持带账号密码的代理。保存后已打开的账号视图会关闭，重新打开账号时生效；清空并保存即关闭代理。</div>
           <input id="modal-proxy-input" class="modal-input" maxlength="120" placeholder="http://127.0.0.1:7890（留空关闭代理）" value="${escapeHtml(modal.draft)}" />
+          <label class="modal-check-row">
+            <input id="modal-proxy-follow" type="checkbox" ${modal.followSystem ? "checked" : ""} />
+            <span>跟随系统代理：自动读取 macOS 系统代理设置（如 Clash / Surge 开启的系统代理），勾选后忽略上方手动地址</span>
+          </label>
+          <div class="modal-desc" style="margin-top:14px;">保活视图上限：后台保持就绪的账号视图数量。越多切换越快、内存占用越高；冷账号的额度会通过临时视图轮流刷新，不占用保活名额。</div>
+          <select id="modal-warm-limit" class="modal-input">
+            <option value="" ${modal.warmLimit === "" ? "selected" : ""}>默认（6 个）</option>
+            <option value="4" ${modal.warmLimit === "4" ? "selected" : ""}>4 个</option>
+            <option value="8" ${modal.warmLimit === "8" ? "selected" : ""}>8 个</option>
+            <option value="10" ${modal.warmLimit === "10" ? "selected" : ""}>10 个</option>
+            <option value="12" ${modal.warmLimit === "12" ? "selected" : ""}>12 个</option>
+            <option value="0" ${modal.warmLimit === "0" ? "selected" : ""}>不限</option>
+          </select>
           <div class="modal-footer">
             <button id="modal-cancel-btn" class="btn" type="button">取消</button>
             <button id="modal-confirm-btn" class="btn primary" type="button">保存</button>
@@ -642,7 +654,6 @@ function renderModal(provider: ProviderInfo): string {
 function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): string {
   const providerAccounts = state.accounts.filter((a) => a.providerId === provider.id);
   const switchingKey = effectiveSwitchingKey(state);
-  const isAndroid = state.platform === "android";
 
   const noticeHtml = state.notice
     ? `
@@ -671,19 +682,51 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
     )
     .join("");
 
-  const hasUpdate = Boolean(updateState.result?.hasUpdate);
-  const androidUpdateBtn = isAndroid
-    ? `<button id="check-update-btn" class="ghost-icon-btn update-trigger-btn ${hasUpdate ? "has-update" : ""}" type="button" title="${hasUpdate ? `发现新版本 v${escapeHtml(updateState.result!.latestVersion)}` : "检查更新"}">${ICON_UPDATE}${hasUpdate ? `<span class="update-dot"></span>` : ""}</button>`
-    : "";
-
   const headerBtnHtml = provider.enabled
     ? `
-      ${androidUpdateBtn}
-      ${!isAndroid ? `<button id="sync-all-btn" class="ghost-icon-btn" type="button" title="刷新已就绪账号额度">${ICON_REFRESH}</button>` : ""}
+      <button id="sync-all-btn" class="ghost-icon-btn" type="button" title="刷新已就绪账号额度">${ICON_REFRESH}</button>
       <button id="open-site-btn" class="ghost-icon-btn" type="button" title="在浏览器中打开 ${escapeHtml(provider.shortName)} 官网">${ICON_EXTERNAL}</button>
       <button id="add-account-btn" class="icon-btn primary" type="button">+ 新增</button>
     `
-    : `${androidUpdateBtn}<button id="open-site-btn" class="icon-btn primary" type="button">打开官网 ${ICON_EXTERNAL}</button>`;
+    : `<button id="open-site-btn" class="icon-btn primary" type="button">打开官网 ${ICON_EXTERNAL}</button>`;
+
+  // 额度总览：推荐账号 + 当前账号耗尽时的一键切换
+  const loggedInAccounts = providerAccounts.filter((a) => a.authState === "authenticated");
+  const activeAcc =
+    providerAccounts.find(
+      (a) => state.activeAccount?.providerId === a.providerId && state.activeAccount?.uuid === a.uuid
+    ) ?? null;
+  const activeDepleted = activeAcc ? resolveQuotaState(activeAcc).status === "critical" : false;
+  const recommended =
+    loggedInAccounts
+      .filter(
+        (a) =>
+          a !== activeAcc &&
+          typeof a.quotaPercent === "number" &&
+          resolveQuotaState(a).status !== "critical"
+      )
+      .sort((x, y) => (y.quotaPercent ?? 0) - (x.quotaPercent ?? 0))[0] ?? null;
+  let overviewHtml = "";
+  if (providerAccounts.length >= 2) {
+    if (activeDepleted && recommended) {
+      overviewHtml = `
+      <div class="quota-overview depleted">
+        <span>当前账号额度已用尽</span>
+        <button class="mini-btn overview-switch-btn" data-switch-uuid="${escapeHtml(recommended.uuid)}" type="button">切到「${escapeHtml(recommended.alias)}」（剩余 ${recommended.quotaPercent}%）</button>
+      </div>`;
+    } else if (recommended) {
+      overviewHtml = `
+      <div class="quota-overview">
+        <span>${loggedInAccounts.length} 个已登录 · 推荐「${escapeHtml(recommended.alias)}」（剩余 ${recommended.quotaPercent}%）</span>
+        <button class="mini-btn overview-switch-btn" data-switch-uuid="${escapeHtml(recommended.uuid)}" type="button">切过去</button>
+      </div>`;
+    } else if (loggedInAccounts.length > 0) {
+      overviewHtml = `
+      <div class="quota-overview">
+        <span>${loggedInAccounts.length} 个已登录账号</span>
+      </div>`;
+    }
+  }
 
   let listBody = "";
   if (!provider.enabled) {
@@ -722,13 +765,23 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
 
         const isMac = navigator.userAgent.includes("Mac");
         const shortcutHint =
-          !isAndroid && idx < 9
+          idx < 9
             ? `<span class="shortcut-pill" title="快捷切号">${isMac ? "⌘" : "^"}${idx + 1}</span>`
             : "";
         const alertBadgeHtml = isLoggedOut
           ? `<span class="auth-status-badge">未登录</span>`
-          : alertStatus !== "normal"
-            ? `<span class="quota-warning-badge ${alertStatus}">${alertLabel}</span>`
+          : acc.quotaStale
+            ? `<span class="quota-warning-badge stale" title="连续多次未抓到额度，页面结构可能已变化，当前显示的额度可能不准">抓取异常</span>`
+            : alertStatus !== "normal"
+              ? `<span class="quota-warning-badge ${alertStatus}">${alertLabel}</span>`
+              : "";
+
+        const syncNoteHtml =
+          !isLoggedOut &&
+          !acc.quotaStale &&
+          typeof acc.quotaSyncedAtMs === "number" &&
+          Date.now() - acc.quotaSyncedAtMs > 30 * 60_000
+            ? `<div class="account-sub quota-sync-note"><span class="quota-label-text">额度 ${Math.floor((Date.now() - acc.quotaSyncedAtMs) / 60_000)} 分钟前更新，可能已过期</span></div>`
             : "";
 
         let compactSubHtml = "";
@@ -736,9 +789,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
           compactSubHtml = `<div class="account-sub loading-text"><span class="quota-label-text">正在加载…</span></div>`;
         } else if (isLoggedOut) {
           const loginHint = active
-            ? isAndroid
-              ? "登录已失效，点击进入重新登录"
-              : "登录已失效，请在右侧重新登录"
+            ? "登录已失效，请在右侧重新登录"
             : acc.autoAlias
               ? "尚未登录，点击前往登录"
               : "登录已失效，点击重新登录";
@@ -784,8 +835,11 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
           ? `<div class="avatar has-photo"><img src="${escapeHtml(acc.avatarUrl)}" class="avatar-photo" alt="" draggable="false" /></div>`
           : `<div class="${avatarClass}">${escapeHtml(avatarText)}</div>`;
 
+        const searchHidden =
+          accountSearchQuery.trim() !== "" &&
+          !acc.alias.toLowerCase().includes(accountSearchQuery.trim().toLowerCase());
         return `
-          <div class="${rowClass}" data-switch-uuid="${escapeHtml(acc.uuid)}">
+          <div class="${rowClass}" data-switch-uuid="${escapeHtml(acc.uuid)}" data-search-text="${escapeHtml(acc.alias.toLowerCase())}" ${searchHidden ? `style="display:none;"` : ""}>
             <div class="account-header">
               <div class="avatar-wrap">
                 ${avatarNodeHtml}
@@ -799,8 +853,10 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
                   ${alertBadgeHtml}
                 </div>
                 ${compactSubHtml}
+                ${syncNoteHtml}
               </div>
               <div class="row-ops">
+                <button class="action-icon-btn" data-browser-uuid="${escapeHtml(acc.uuid)}" title="在默认浏览器打开官网（独立会话，作备用入口）" type="button">${ICON_EXTERNAL}</button>
                 <button class="action-icon-btn" data-rename-uuid="${escapeHtml(acc.uuid)}" title="修改备注" type="button">${ICON_EDIT}</button>
                 <button class="action-icon-btn danger" data-remove-uuid="${escapeHtml(acc.uuid)}" title="从本机移除" type="button">${ICON_TRASH}</button>
               </div>
@@ -828,6 +884,8 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
     </div>
     ${noticeHtml}
     ${conflictsHtml}
+    ${providerAccounts.length >= 5 ? `<div class="account-search-row"><input id="account-search-input" class="account-search" type="text" placeholder="搜索账号（别名 / 邮箱）" value="${escapeHtml(accountSearchQuery)}" /></div>` : ""}
+    ${overviewHtml}
     <div class="account-list">${listBody}</div>
     ${renderModal(provider)}
   `;
@@ -888,29 +946,7 @@ function render(): void {
   if (!root || !snapshot) return;
 
   const provider = currentProvider(snapshot);
-  const isAndroid = snapshot.platform === "android";
 
-  if (isAndroid) {
-    root.innerHTML = `
-      <div class="mobile-shell">
-        <div class="mobile-tabs">
-          ${snapshot.providers
-            .map(
-              (p) => `
-              <button class="mobile-tab ${p.id === provider.id ? "active" : ""}" data-provider="${escapeHtml(p.id)}" type="button">
-                ${renderProviderLogo(p.id, "mobile-tab-logo")}
-                <span>${escapeHtml(p.shortName)}</span>
-              </button>
-            `
-            )
-            .join("")}
-        </div>
-        <div class="middle-column" style="width:100%;min-width:0;flex:1;border-right:none;">
-          ${renderMiddleContent(snapshot, provider)}
-        </div>
-      </div>
-    `;
-  } else {
     root.innerHTML = `
       <div class="desktop-shell">
         <aside class="service-rail">
@@ -963,7 +999,7 @@ function render(): void {
         ${renderRightStage(snapshot, provider)}
       </div>
     `;
-  }
+  
 
   bindEvents(snapshot, provider);
 }
@@ -1008,7 +1044,7 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
 
   document.querySelector("#proxy-settings-btn")?.addEventListener("click", async () => {
     if (modal.kind !== "none") return;
-    await setModal({ kind: "proxy", draft: state.proxyUrl ?? "" });
+    await setModal({ kind: "proxy", draft: state.proxyUrl ?? "", warmLimit: state.warmViewLimit === null ? "" : String(state.warmViewLimit), followSystem: state.proxyFollowSystem });
   });
 
   document.querySelector("#check-update-btn")?.addEventListener("click", async () => {
@@ -1048,6 +1084,23 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     });
   });
 
+  const searchInput = document.querySelector<HTMLInputElement>("#account-search-input");
+  searchInput?.addEventListener("input", () => {
+    accountSearchQuery = searchInput.value;
+    const q = accountSearchQuery.trim().toLowerCase();
+    document.querySelectorAll<HTMLElement>("[data-search-text]").forEach((row) => {
+      const text = row.dataset.searchText ?? "";
+      row.style.display = q === "" || text.includes(q) ? "" : "none";
+    });
+  });
+
+  document.querySelectorAll<HTMLElement>("[data-browser-uuid]").forEach((btn) => {
+    btn.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      await invoke("open_external_url", { url: provider.homepageUrl });
+    });
+  });
+
   document.querySelectorAll<HTMLElement>("[data-rename-uuid]").forEach((btn) => {
     btn.addEventListener("click", async (ev) => {
       ev.stopPropagation();
@@ -1081,8 +1134,7 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
       if (!uuid) return;
       if (
         state.activeAccount?.providerId === provider.id &&
-        state.activeAccount?.uuid === uuid &&
-        state.platform !== "android"
+        state.activeAccount?.uuid === uuid
       ) {
         return;
       }
@@ -1160,8 +1212,22 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
       });
     } else if (currentModal.kind === "proxy") {
       const proxyUrl = currentModal.draft.trim();
+      const followEl = document.querySelector<HTMLInputElement>("#modal-proxy-follow");
+      const followSystem = followEl ? followEl.checked : undefined;
+      const warmSel = document.querySelector<HTMLSelectElement>("#modal-warm-limit");
+      const warmLimit = warmSel
+        ? warmSel.value === ""
+          ? null
+          : parseInt(warmSel.value, 10)
+        : undefined;
       await setModal({ kind: "none" });
       await callCommand("set_proxy_url", { proxyUrl });
+      if (warmLimit !== undefined && warmLimit !== snapshot?.warmViewLimit) {
+        await callCommand("set_warm_view_limit", { limit: warmLimit });
+      }
+      if (followSystem !== undefined && followSystem !== snapshot?.proxyFollowSystem) {
+        await callCommand("set_proxy_follow_system", { enabled: followSystem });
+      }
     }
   });
 }

@@ -2024,12 +2024,13 @@ dependencies = [
 
 [[package]]
 name = "multi-agent-account-manager"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "block2",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "objc2-user-notifications",
  "objc2-web-kit",
  "open",
  "reqwest",
@@ -2038,12 +2039,9 @@ dependencies = [
  "sha2 0.10.9",
  "tauri",
  "tauri-build",
- "tauri-plugin-account-session",
  "tokio",
  "url",
  "uuid",
- "webview2-com",
- "windows",
 ]
 
 [[package]]
@@ -2314,7 +2312,10 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.13.2",
+ "block2",
  "objc2",
+ "objc2-core-location",
  "objc2-foundation",
 ]
 
@@ -3682,32 +3683,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tauri-plugin"
-version = "2.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51bf2a10dc09e68324a8227b3ec785bd8b61872ddb978c3447b07bc7dd180b25"
-dependencies = [
- "anyhow",
- "glob",
- "plist",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "tauri-utils",
- "walkdir",
-]
-
-[[package]]
-name = "tauri-plugin-account-session"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tauri",
- "tauri-plugin",
-]
-
-[[package]]
 name = "tauri-runtime"
 version = "2.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3813,7 +3788,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
