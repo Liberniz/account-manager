@@ -5,18 +5,21 @@ use url::Url;
 #[serde(rename_all = "lowercase")]
 pub enum ProviderId {
   Muse,
+  TeleAgent,
 }
 
 impl ProviderId {
   pub fn as_str(self) -> &'static str {
     match self {
       ProviderId::Muse => "muse",
+      ProviderId::TeleAgent => "teleagent",
     }
   }
 
   pub fn parse(value: &str) -> Option<Self> {
     match value.trim().to_ascii_lowercase().as_str() {
       "muse" => Some(ProviderId::Muse),
+      "teleagent" => Some(ProviderId::TeleAgent),
       _ => None,
     }
   }
@@ -64,6 +67,21 @@ pub const PROVIDERS: &[ProviderSpec] = &[
       "appleid.apple.com",
       "idmsa.apple.com",
     ],
+  },
+  ProviderSpec {
+    info: ProviderInfo {
+      id: ProviderId::TeleAgent,
+      name: "TeleAgent · 星辰超级智能体",
+      short_name: "TeleAgent",
+      enabled: true,
+      status_text: "已启用",
+      entry_url: "https://agent.teleai.com.cn/teleagent",
+      homepage_url: "https://agent.teleai.com.cn/teleagent",
+      callback_origins: &["https://agent.teleai.com.cn"],
+      verified_methods: &["token"],
+    },
+    // host_matches 带子域名匹配：teleai.com.cn 覆盖 agent/cdn-ta/www 等子域。
+    allowed_hosts: &["teleai.com.cn"],
   },
 ];
 

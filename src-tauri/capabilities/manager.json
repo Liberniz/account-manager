@@ -13,6 +13,8 @@
     "allow-rename-account",
     "allow-set-account-note",
     "allow-reorder-accounts",
+    "allow-add-teleagent-account",
+    "allow-update-teleagent-token",
     "allow-retry-account-view",
     "allow-refresh-all-quotas",
     "allow-remove-account",

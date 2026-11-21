@@ -16,6 +16,8 @@ import type {
 type ModalMode =
   | { kind: "none" }
   | { kind: "add"; providerId: ProviderId; draft: string }
+  | { kind: "add-teleagent"; tokenDraft: string; deviceDraft: string }
+  | { kind: "update-teleagent"; account: AccountRecord; tokenDraft: string; deviceDraft: string }
   | { kind: "rename"; account: AccountRecord; draft: string; noteDraft: string }
   | { kind: "remove"; account: AccountRecord }
   | { kind: "proxy"; draft: string; warmLimit: string; followSystem: boolean }
@@ -23,11 +25,13 @@ type ModalMode =
 
 const PROVIDER_LOGOS: Record<ProviderId, { src: string; fullBleed: boolean }> = {
   muse: { src: "/logos/muse.png", fullBleed: true },
+  teleagent: { src: "/logos/teleagent.svg", fullBleed: true },
 };
 
 const ICON_EXTERNAL = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`;
 const ICON_REFRESH = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>`;
 const ICON_EDIT = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>`;
+const ICON_KEY = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M11 12L21 2"/><path d="M16 7l3 3"/></svg>`;
 const ICON_TRASH = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
 const ICON_USER_PLUS = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>`;
 const ICON_UPDATE = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
@@ -62,6 +66,7 @@ const updateState: {
 
 const scrollOffsets: Record<ProviderId, number> = {
   muse: 0,
+  teleagent: 0,
 };
 
 function isSameKey(a: AccountKey | null, b: AccountRecord): boolean {
@@ -94,6 +99,11 @@ function computeAvatarText(acc: AccountRecord): string {
   const clean = acc.alias.trim();
   const first = Array.from(clean)[0];
   return first ? first.toUpperCase() : "#";
+}
+
+function fmtDateMs(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getMonth() + 1}月${d.getDate()}日`;
 }
 
 function splitQuotaValue(raw: string): { main: string; note: string | null } {
@@ -613,6 +623,47 @@ function renderModal(provider: ProviderInfo): string {
       </div>
     `;
   }
+  if (modal.kind === "add-teleagent") {
+    return `
+      <div class="inline-modal" role="dialog" aria-modal="true">
+        <div class="modal-card">
+          <div class="modal-title">新增 TeleAgent 账号</div>
+          <div class="modal-desc">不走网页登录：粘贴从桌面客户端提取的 operationToken，叠号会把它种入该账号的隔离视图、直接进入登录态。别名与到期时间自动从 token 解析，token 只存本机。</div>
+          <textarea id="modal-token-input" class="modal-input modal-textarea" rows="4" placeholder="粘贴 operationToken（整段粘贴即可）">${escapeHtml(modal.tokenDraft)}</textarea>
+          <div class="modal-desc" style="margin-top:14px;">设备 ID（选填）：填了才能在账号旁显示积分与签到状态，不填不影响网页端使用。</div>
+          <input id="modal-device-input" class="modal-input" maxlength="80" placeholder="X-SuperAgent-Device-Id（可留空）" value="${escapeHtml(modal.deviceDraft)}" />
+          <div class="modal-footer">
+            <button id="modal-cancel-btn" class="btn" type="button">取消</button>
+            <button id="modal-confirm-btn" class="btn primary" type="button">添加并打开</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  if (modal.kind === "update-teleagent") {
+    const exp = modal.account.tokenExpiresAtMs;
+    const expText =
+      typeof exp === "number"
+        ? exp <= Date.now()
+          ? `当前 token 已过期（${fmtDateMs(exp)} 到期）`
+          : `当前 token ${fmtDateMs(exp)} 到期`
+        : "当前 token 到期时间未知";
+    return `
+      <div class="inline-modal" role="dialog" aria-modal="true">
+        <div class="modal-card">
+          <div class="modal-title">更新 token · ${escapeHtml(modal.account.alias)}</div>
+          <div class="modal-desc">${expText}。粘贴新的 operationToken 后，该账号视图会自动刷新为新登录态。</div>
+          <textarea id="modal-token-input" class="modal-input modal-textarea" rows="4" placeholder="粘贴新的 operationToken（整段粘贴即可）">${escapeHtml(modal.tokenDraft)}</textarea>
+          <div class="modal-desc" style="margin-top:14px;">设备 ID（选填）：留空则保留原值，填了才能显示积分与签到状态。</div>
+          <input id="modal-device-input" class="modal-input" maxlength="80" placeholder="X-SuperAgent-Device-Id（可留空）" value="${escapeHtml(modal.deviceDraft)}" />
+          <div class="modal-footer">
+            <button id="modal-cancel-btn" class="btn" type="button">取消</button>
+            <button id="modal-confirm-btn" class="btn primary" type="button">保存并刷新</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
   if (modal.kind === "proxy") {
     return `
       <div class="inline-modal" role="dialog" aria-modal="true">
@@ -763,7 +814,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
       <div class="empty-list">
         <div class="empty-icon-circle">${ICON_USER_PLUS}</div>
         <div>暂无 ${escapeHtml(provider.shortName)} 账号</div>
-        <div>点击右上角「+ 新增」创建独立登录环境</div>
+        <div>${provider.id === "teleagent" ? "点击右上角「+ 新增」粘贴 operationToken 添加" : "点击右上角「+ 新增」创建独立登录环境"}</div>
       </div>
     `;
   } else {
@@ -773,6 +824,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
         const active = !switching && isSameKey(state.activeAccount, acc);
         const avatarText = computeAvatarText(acc);
         const isLoggedOut = acc.authState === "logged_out";
+        const isTeleagent = acc.providerId === "teleagent";
         const hasDetail = !isLoggedOut && Boolean(acc.quotaDetail);
 
         const quotaState = isLoggedOut
@@ -799,9 +851,15 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
                 ? `<span class="session-badge done">已完成</span>`
                 : "";
 
-        const alertBadgeHtml = isLoggedOut
-          ? `<span class="auth-status-badge">未登录</span>`
-          : acc.quotaStale
+        const tokenExpired =
+          isTeleagent &&
+          typeof acc.tokenExpiresAtMs === "number" &&
+          acc.tokenExpiresAtMs <= Date.now();
+        const alertBadgeHtml = tokenExpired
+          ? `<span class="quota-warning-badge critical">token 已失效</span>`
+          : isLoggedOut
+            ? `<span class="auth-status-badge">未登录</span>`
+            : acc.quotaStale
             ? `<span class="quota-warning-badge stale" title="连续多次未抓到额度，页面结构可能已变化，当前显示的额度可能不准">抓取异常</span>`
             : acc.viewError
               ? `<span class="quota-warning-badge stale" title="该账号的保活视图预热失败，额度可能不刷新，点行尾的刷新按钮重试">视图异常</span>`
@@ -820,6 +878,37 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
         let compactSubHtml = "";
         if (switching && !hasDetail) {
           compactSubHtml = `<div class="account-sub loading-text"><span class="quota-label-text">正在加载…</span></div>`;
+        } else if (isTeleagent) {
+          if (isLoggedOut) {
+            compactSubHtml = `<div class="account-sub auth-logged-out"><span class="auth-dot-inline"></span><span class="quota-label-text">token 已失效，点行尾钥匙按钮更新</span></div>`;
+          } else {
+            const exp = acc.tokenExpiresAtMs;
+            let expLine: string;
+            if (typeof exp === "number") {
+              expLine =
+                exp <= Date.now()
+                  ? `token 已过期 · ${fmtDateMs(exp)} 到期`
+                  : `token 剩 ${Math.ceil((exp - Date.now()) / 86_400_000)} 天 · ${fmtDateMs(exp)} 到期`;
+            } else {
+              expLine = "token 到期时间未知";
+            }
+            const expClass =
+              typeof exp === "number" &&
+              (exp <= Date.now() || (exp - Date.now()) / 86_400_000 <= 5)
+                ? "account-sub quota-low"
+                : "account-sub";
+            let pointsLine: string;
+            let pointsClass = "account-sub";
+            if (acc.taPointsError) {
+              pointsLine = acc.taPointsError;
+              pointsClass = "account-sub quota-empty";
+            } else if (typeof acc.taTotalPoints === "number") {
+              pointsLine = `今日${acc.taClaimedToday ? "已签" : "未签"} · 累计 ${acc.taTotalPoints.toLocaleString()} 积分 · 连签 ${acc.taClaimDays ?? 0} 天`;
+            } else {
+              pointsLine = "积分同步中…";
+            }
+            compactSubHtml = `<div class="${expClass}"><span class="quota-label-text">${escapeHtml(expLine)}</span></div><div class="${pointsClass}"><span class="quota-label-text">${escapeHtml(pointsLine)}</span></div>`;
+          }
         } else if (isLoggedOut) {
           const loginHint = active
             ? "登录已失效，请在右侧重新登录"
@@ -893,6 +982,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
               </div>
               <div class="row-ops">
                 ${acc.viewError && !isLoggedOut ? `<button class="action-icon-btn" data-retry-uuid="${escapeHtml(acc.uuid)}" title="视图预热失败，点此重试" type="button">${ICON_REFRESH}</button>` : ""}
+                ${isTeleagent ? `<button class="action-icon-btn" data-update-token-uuid="${escapeHtml(acc.uuid)}" title="更新 operationToken" type="button">${ICON_KEY}</button>` : ""}
                 <button class="action-icon-btn" data-browser-uuid="${escapeHtml(acc.uuid)}" title="在默认浏览器打开官网（独立会话，作备用入口）" type="button">${ICON_EXTERNAL}</button>
                 <button class="action-icon-btn" data-rename-uuid="${escapeHtml(acc.uuid)}" title="修改备注" type="button">${ICON_EDIT}</button>
                 <button class="action-icon-btn danger" data-remove-uuid="${escapeHtml(acc.uuid)}" title="从本机移除" type="button">${ICON_TRASH}</button>
@@ -919,6 +1009,17 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
       </div>
       <div class="header-actions">${headerBtnHtml}</div>
     </div>
+    ${
+      state.providers.filter((p) => p.enabled).length > 1
+        ? `<div class="provider-switch">${state.providers
+            .filter((p) => p.enabled)
+            .map(
+              (p) =>
+                `<button class="provider-chip ${p.id === provider.id ? "active" : ""}" data-provider="${escapeHtml(p.id)}" type="button">${renderProviderLogo(p.id, "chip-logo")}<span>${escapeHtml(p.shortName)}</span></button>`
+            )
+            .join("")}</div>`
+        : ""
+    }
     ${noticeHtml}
     ${conflictsHtml}
     ${providerAccounts.length >= 5 ? `<div class="account-search-row"><input id="account-search-input" class="account-search" type="text" placeholder="搜索账号（别名 / 备注）" value="${escapeHtml(accountSearchQuery)}" /></div>` : ""}
@@ -1022,8 +1123,21 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     }
   });
 
+  document.querySelectorAll<HTMLElement>("[data-provider]").forEach((el) => {
+    el.addEventListener("click", async () => {
+      const pid = el.dataset.provider as ProviderId | undefined;
+      if (pid && snapshot && pid !== snapshot.selectedProviderId) {
+        await callCommand("select_provider", { providerId: pid });
+      }
+    });
+  });
+
   const openAddModal = async () => {
-    await setModal({ kind: "add", providerId: provider.id, draft: "" });
+    if (provider.id === "teleagent") {
+      await setModal({ kind: "add-teleagent", tokenDraft: "", deviceDraft: "" });
+    } else {
+      await setModal({ kind: "add", providerId: provider.id, draft: "" });
+    }
   };
   document.querySelector("#add-account-btn")?.addEventListener("click", openAddModal);
   document.querySelector("#stage-add-btn")?.addEventListener("click", openAddModal);
@@ -1192,6 +1306,22 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     });
   });
 
+  document.querySelectorAll<HTMLElement>("[data-update-token-uuid]").forEach((btn) => {
+    btn.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      const uuid = btn.dataset.updateTokenUuid;
+      const acc = state.accounts.find((a) => a.providerId === provider.id && a.uuid === uuid);
+      if (acc) {
+        await setModal({
+          kind: "update-teleagent",
+          account: acc,
+          tokenDraft: "",
+          deviceDraft: "",
+        });
+      }
+    });
+  });
+
   document.querySelectorAll<HTMLElement>("[data-rename-uuid]").forEach((btn) => {
     btn.addEventListener("click", async (ev) => {
       ev.stopPropagation();
@@ -1268,6 +1398,20 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     }
   });
 
+  const tokenInput = document.querySelector<HTMLTextAreaElement>("#modal-token-input");
+  tokenInput?.addEventListener("input", () => {
+    if (modal.kind === "add-teleagent" || modal.kind === "update-teleagent") {
+      modal.tokenDraft = tokenInput.value;
+    }
+  });
+
+  const deviceInput = document.querySelector<HTMLInputElement>("#modal-device-input");
+  deviceInput?.addEventListener("input", () => {
+    if (modal.kind === "add-teleagent" || modal.kind === "update-teleagent") {
+      modal.deviceDraft = deviceInput.value;
+    }
+  });
+
   const noteInput = document.querySelector<HTMLInputElement>("#modal-note-input");
   noteInput?.addEventListener("input", () => {
     if (modal.kind === "rename") {
@@ -1316,6 +1460,19 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
           note,
         });
       }
+    } else if (currentModal.kind === "add-teleagent") {
+      const token = currentModal.tokenDraft.trim();
+      if (!token) return;
+      const deviceId = currentModal.deviceDraft.trim();
+      await setModal({ kind: "none" });
+      await callCommand("add_teleagent_account", { token, deviceId });
+    } else if (currentModal.kind === "update-teleagent") {
+      const token = currentModal.tokenDraft.trim();
+      if (!token) return;
+      const deviceId = currentModal.deviceDraft.trim();
+      const uuid = currentModal.account.uuid;
+      await setModal({ kind: "none" });
+      await callCommand("update_teleagent_token", { uuid, token, deviceId });
     } else if (currentModal.kind === "remove") {
       await setModal({ kind: "none" });
       await callCommand("remove_account", {

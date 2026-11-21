@@ -82,6 +82,27 @@ async fn reorder_accounts(
 }
 
 #[tauri::command]
+async fn add_teleagent_account(
+  app: AppHandle,
+  mgr: State<'_, Arc<SessionManager>>,
+  token: String,
+  device_id: String,
+) -> Result<ManagerSnapshot, String> {
+  mgr.add_teleagent_account(&app, &token, &device_id).await
+}
+
+#[tauri::command]
+async fn update_teleagent_token(
+  app: AppHandle,
+  mgr: State<'_, Arc<SessionManager>>,
+  uuid: String,
+  token: String,
+  device_id: String,
+) -> Result<ManagerSnapshot, String> {
+  mgr.update_teleagent_token(&app, &uuid, &token, &device_id).await
+}
+
+#[tauri::command]
 async fn remove_account(
   app: AppHandle,
   mgr: State<'_, Arc<SessionManager>>,
@@ -223,7 +244,7 @@ pub fn run() {
                   let _ = win.set_focus();
                 }
                 let mgr = app_handle.state::<Arc<SessionManager>>();
-                let _ = mgr.switch_account(&app_handle, "muse", &uuid).await;
+                let _ = mgr.switch_account_by_uuid(&app_handle, &uuid).await;
               });
             }
           });
@@ -338,6 +359,8 @@ pub fn run() {
       rename_account,
       set_account_note,
       reorder_accounts,
+      add_teleagent_account,
+      update_teleagent_token,
       retry_account_view,
       refresh_all_quotas,
       remove_account,

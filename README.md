@@ -2,13 +2,14 @@
 
 [![LINUX DO](https://img.shields.io/badge/Community-LINUX%20DO-0064e0?style=flat-square)](https://linux.do/)
 
-基于 Tauri 2 构建的 macOS（Apple Silicon）AI 助手多账号隔离与快速切换工具，安装后应用名称为 **叠号**。自 v0.2.0 起仅保留 macOS 版，并仅支持 Muse 一个服务。
+基于 Tauri 2 构建的 macOS（Apple Silicon）AI 助手多账号隔离与快速切换工具，安装后应用名称为 **叠号**。自 v0.2.0 起仅保留 macOS 版；v0.4.0 起新增 TeleAgent（星辰超级智能体）服务。
 
 ## 支持服务与核心特性
 
 | 服务 | 状态 | 说明 |
 | --- | --- | --- |
 | **Muse · Meta** | 已启用 | 独立会话隔离、邮箱识别、额度明细同步 |
+| **TeleAgent · 星辰超级智能体** | 已启用 | 粘贴 operationToken 免登录添加、token 到期与积分/签到状态显示 |
 
 - **原生级多账号隔离**：每个账号使用独立 UUID 的 `WKWebsiteDataStore`，Cookie 与本地存储互不干扰。
 - **代理设置（仅 macOS）**：左侧栏底部「代理」可设置 `http://` / `socks5://` 代理（如 `http://127.0.0.1:7890`，需带端口，暂不支持账号密码），账号页面、登录弹窗与应用内更新均经此代理；保存后已打开的账号视图会关闭，重新打开账号时生效，清空并保存即关闭代理。需要 macOS 14.0+。

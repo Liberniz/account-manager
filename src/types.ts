@@ -1,4 +1,4 @@
-export type ProviderId = "muse";
+export type ProviderId = "muse" | "teleagent";
 export type AuthState = "unknown" | "authenticated" | "logged_out";
 
 export interface AccountKey {
@@ -46,6 +46,12 @@ export interface AccountRecord {
   sessionState: string;
   viewError: boolean;
   sortOrder: number;
+  tokenExpiresAtMs: number | null;
+  taClaimedToday: boolean | null;
+  taTotalPoints: number | null;
+  taClaimDays: number | null;
+  taPointsSyncedAtMs: number | null;
+  taPointsError: string;
 }
 
 export interface ConflictItem {

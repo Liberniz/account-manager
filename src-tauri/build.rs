@@ -5,6 +5,8 @@ const APP_COMMANDS: &[&str] = &[
   "rename_account",
   "set_account_note",
   "reorder_accounts",
+  "add_teleagent_account",
+  "update_teleagent_token",
   "retry_account_view",
   "refresh_all_quotas",
   "remove_account",

@@ -397,6 +397,60 @@ body,
   color: #0064e0;
 }
 
+.avatar.teleagent {
+  background: #e1f0fa;
+  color: #0072bc;
+}
+
+.provider-switch {
+  display: flex;
+  gap: 6px;
+  padding: 10px 14px 2px;
+  background: var(--list-bg);
+}
+
+.provider-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px 4px 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-sub);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.provider-chip:hover {
+  border-color: var(--border-strong);
+}
+
+.provider-chip.active {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.provider-chip img.chip-logo {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  display: block;
+}
+
+.modal-textarea {
+  height: auto;
+  min-height: 78px;
+  padding: 9px 11px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
 
 .avatar.pending-identity {
   background: #f1f5f9;

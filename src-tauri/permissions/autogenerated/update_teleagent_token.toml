@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-teleagent-token"
+description = "Enables the update_teleagent_token command without any pre-configured scope."
+commands.allow = ["update_teleagent_token"]
+
+[[permission]]
+identifier = "deny-update-teleagent-token"
+description = "Denies the update_teleagent_token command without any pre-configured scope."
+commands.deny = ["update_teleagent_token"]
