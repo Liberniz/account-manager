@@ -472,13 +472,23 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
         };
         const btnText = (el) => (((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')).trim());
         const buttons = Array.from(document.querySelectorAll('button, [role="button"]')).filter(vis);
-        const approveRe = /^(允许|批准|同意|确认|运行|执行|allow|approve|accept|run|yes)/i;
-        const denyRe = /^(拒绝|取消|不允许|deny|reject|cancel|no)/i;
-        const hasApprove = buttons.some((b) => approveRe.test(btnText(b)));
-        const hasDeny = buttons.some((b) => denyRe.test(btnText(b)));
+        // 待审批检测（v0.3.2 收紧）：只认审批专用词，且允许/拒绝按钮必须同处一个
+        // 小容器（祖先 5 层内）才算一张审批卡。旧版用宽词表（确认/取消等通用词）
+        // 做全页散布匹配，任意对话框的确认+取消按钮对都会误报待审批；
+        // 正文关键词路径也一并去掉（聊天内容本身什么都可能写）。
+        const allowRe = /允许|批准|同意|allow|approve/i;
+        const denyRe = /拒绝|deny|reject/i;
+        const allowBtns = buttons.filter((b) => { const t = btnText(b); return allowRe.test(t) && !denyRe.test(t); });
+        const denyBtns = buttons.filter((b) => denyRe.test(btnText(b)));
+        const shareContainer = (a, b) => {
+          let n = a.parentElement;
+          for (let i = 0; i < 5 && n; i++) { if (n.contains(b)) return true; n = n.parentElement; }
+          return false;
+        };
+        let isWaiting = false;
+        for (const a of allowBtns) { for (const d of denyBtns) { if (shareContainer(a, d)) { isWaiting = true; break; } } if (isWaiting) break; }
+        if (isWaiting) return 'waiting';
         const bodyTxt = (document.body && document.body.innerText) || '';
-        const approvalHint = /需要你的批准|需要批准|等待批准|请求批准|wants to run|needs your approval|permission to/i.test(bodyTxt);
-        if ((hasApprove && hasDeny) || (approvalHint && (hasApprove || hasDeny))) return 'waiting';
         const hasStop = buttons.some((b) => /停止|stop/i.test(btnText(b)));
         if (hasStop) return 'working';
         if (/正在思考|正在生成|thinking\.\.\.|working on it/i.test(bodyTxt)) return 'working';
