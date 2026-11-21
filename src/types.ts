@@ -45,6 +45,7 @@ export interface AccountRecord {
   note: string;
   sessionState: string;
   viewError: boolean;
+  sortOrder: number;
 }
 
 export interface ConflictItem {

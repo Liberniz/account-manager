@@ -1380,3 +1380,28 @@ body,
   color: #92400e;
   font-weight: 600;
 }
+
+/* ===== v0.3.3: 账号拖拽排序 ===== */
+.account-row[draggable="true"] {
+  cursor: grab;
+}
+
+.account-row[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+.account-row img {
+  -webkit-user-drag: none;
+}
+
+.account-row.dragging {
+  opacity: 0.45;
+}
+
+.account-row.drop-before {
+  box-shadow: 0 -2px 0 0 var(--primary);
+}
+
+.account-row.drop-after {
+  box-shadow: 0 2px 0 0 var(--primary);
+}

@@ -80,6 +80,9 @@ pub struct AccountRecord {
   /// 视图预热失败标记（运行时注入快照，落盘副本恒为 false）。
   #[serde(default)]
   pub view_error: bool,
+  /// 手动排序值（拖拽排序）：越小越靠前，快照/托盘/列表都按它排。
+  #[serde(default)]
+  pub sort_order: i64,
 }
 
 /// 主窗口几何（逻辑像素的位置与尺寸），用于重启后恢复窗口大小/位置。
@@ -343,6 +346,11 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
           .to_string(),
         session_state: "unknown".to_string(),
         view_error: false,
+        sort_order: item_obj
+          .get("sortOrder")
+          .or_else(|| item_obj.get("sort_order"))
+          .and_then(|v| v.as_i64())
+          .unwrap_or(0),
       });
     }
   }
@@ -479,6 +487,18 @@ pub fn load_or_migrate_store(path: &Path) -> LoadedAccountsStore {
       };
     }
   };
+
+  // 排序值归一化：旧数据全为 0 或存在重复时，按当前文件顺序重新编号，
+  // 保证每个账号的 sort_order 唯一（拖拽排序的依据）。
+  {
+    let mut seen = std::collections::HashSet::new();
+    let has_dup = store.accounts.iter().any(|a| !seen.insert(a.sort_order));
+    if has_dup {
+      for (i, acc) in store.accounts.iter_mut().enumerate() {
+        acc.sort_order = (i as i64) * 1024;
+      }
+    }
+  }
 
   let conflicts = detect_conflicts(&store.accounts);
   if !conflicts.is_empty() {

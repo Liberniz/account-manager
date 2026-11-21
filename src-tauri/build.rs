@@ -4,6 +4,7 @@ const APP_COMMANDS: &[&str] = &[
   "add_account",
   "rename_account",
   "set_account_note",
+  "reorder_accounts",
   "retry_account_view",
   "refresh_all_quotas",
   "remove_account",

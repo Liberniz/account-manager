@@ -73,6 +73,15 @@ async fn refresh_all_quotas(
 }
 
 #[tauri::command]
+async fn reorder_accounts(
+  mgr: State<'_, Arc<SessionManager>>,
+  provider_id: String,
+  ordered_uuids: Vec<String>,
+) -> Result<ManagerSnapshot, String> {
+  mgr.reorder_accounts(&provider_id, ordered_uuids).await
+}
+
+#[tauri::command]
 async fn remove_account(
   app: AppHandle,
   mgr: State<'_, Arc<SessionManager>>,
@@ -328,6 +337,7 @@ pub fn run() {
       add_account,
       rename_account,
       set_account_note,
+      reorder_accounts,
       retry_account_view,
       refresh_all_quotas,
       remove_account,

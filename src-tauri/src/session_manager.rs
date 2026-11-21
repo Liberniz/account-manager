@@ -924,6 +924,7 @@ impl SessionManager {
       .collect::<Vec<_>>();
 
     let mut snapshot_accounts = locked.store.accounts.clone();
+    snapshot_accounts.sort_by_key(|a| a.sort_order);
     for acc in &mut snapshot_accounts {
       let k = AccountKey {
         provider_id: acc.provider_id,
@@ -1419,6 +1420,14 @@ impl SessionManager {
         }
       };
 
+      let next_sort_order = locked
+        .store
+        .accounts
+        .iter()
+        .map(|a| a.sort_order)
+        .max()
+        .unwrap_or(-1024)
+        + 1024;
       locked.store.accounts.push(AccountRecord {
         provider_id,
         uuid: uuid.clone(),
@@ -1435,6 +1444,7 @@ impl SessionManager {
         note: String::new(),
         session_state: "unknown".to_string(),
         view_error: false,
+        sort_order: next_sort_order,
       });
       save_store_atomic(&locked.store_path, &locked.store)?;
       locked.selected_provider_id = provider_id;
@@ -1612,6 +1622,41 @@ impl SessionManager {
     if let Some((title, body)) = notice {
       Self::notify(app, &title, &body);
     }
+  }
+
+  /// 拖拽排序：按前端给出的顺序重新编号该 provider 的账号 sort_order 并落盘。
+  /// 未出现在列表中的账号按现有相对顺序追加在末尾，避免丢号。
+  pub async fn reorder_accounts(
+    &self,
+    raw_provider: &str,
+    ordered_uuids: Vec<String>,
+  ) -> Result<ManagerSnapshot, String> {
+    let provider_id =
+      ProviderId::parse(raw_provider).ok_or_else(|| "无效的服务标识".to_string())?;
+    let mut locked = self.inner.lock().await;
+    let mut order: Vec<String> = ordered_uuids;
+    for acc in locked
+      .store
+      .accounts
+      .iter()
+      .filter(|a| a.provider_id == provider_id)
+    {
+      if !order.contains(&acc.uuid) {
+        order.push(acc.uuid.clone());
+      }
+    }
+    for (idx, uuid) in order.iter().enumerate() {
+      if let Some(acc) = locked
+        .store
+        .accounts
+        .iter_mut()
+        .find(|a| a.provider_id == provider_id && &a.uuid == uuid)
+      {
+        acc.sort_order = (idx as i64) * 1024;
+      }
+    }
+    save_store_atomic(&locked.store_path, &locked.store)?;
+    Ok(Self::snapshot_from_locked(&locked))
   }
 
   pub async fn remove_account(

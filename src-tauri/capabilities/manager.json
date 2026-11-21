@@ -12,6 +12,7 @@
     "allow-add-account",
     "allow-rename-account",
     "allow-set-account-note",
+    "allow-reorder-accounts",
     "allow-retry-account-view",
     "allow-refresh-all-quotas",
     "allow-remove-account",
