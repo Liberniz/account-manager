@@ -29,7 +29,7 @@
 
 ## 下载与安装
 
-前往 [GitHub Releases](https://github.com/ldjx7/multi-agent-account-manager/releases) 下载对应平台安装包：
+前往 [GitHub Releases](https://github.com/Liberniz/multi-agent-account-manager/releases) 下载对应平台安装包：
 
 | 平台 | 下载文件 | 架构 / 系统要求 |
 | --- | --- | --- |

@@ -45,6 +45,34 @@ async fn rename_account(
 }
 
 #[tauri::command]
+async fn set_account_note(
+  mgr: State<'_, Arc<SessionManager>>,
+  provider_id: String,
+  uuid: String,
+  note: String,
+) -> Result<ManagerSnapshot, String> {
+  mgr.set_account_note(&provider_id, &uuid, &note).await
+}
+
+#[tauri::command]
+async fn retry_account_view(
+  app: AppHandle,
+  mgr: State<'_, Arc<SessionManager>>,
+  provider_id: String,
+  uuid: String,
+) -> Result<ManagerSnapshot, String> {
+  mgr.retry_account_view(&app, &provider_id, &uuid).await
+}
+
+#[tauri::command]
+async fn refresh_all_quotas(
+  app: AppHandle,
+  mgr: State<'_, Arc<SessionManager>>,
+) -> Result<ManagerSnapshot, String> {
+  mgr.refresh_all_quotas(&app).await
+}
+
+#[tauri::command]
 async fn remove_account(
   app: AppHandle,
   mgr: State<'_, Arc<SessionManager>>,
@@ -203,6 +231,18 @@ pub fn run() {
           .min_inner_size(760.0, 520.0)
           .build()?;
 
+        // 恢复上次保存的窗口大小/位置（首次启动或无记录时用默认 1240x800）。
+        if let Some(geo) = session_mgr.initial_window_geometry() {
+          let _ = main_window.set_size(tauri::PhysicalSize::new(
+            geo.width.round() as u32,
+            geo.height.round() as u32,
+          ));
+          let _ = main_window.set_position(tauri::PhysicalPosition::new(
+            geo.x.round() as i32,
+            geo.y.round() as i32,
+          ));
+        }
+
         let manager_builder =
           tauri::webview::WebviewBuilder::new("manager", tauri::WebviewUrl::App("index.html".into()))
             .on_navigation(|url| {
@@ -219,8 +259,37 @@ pub fn run() {
 
         let app_for_resize = app.handle().clone();
         let mgr_for_resize = Arc::clone(&session_mgr);
+        let mgr_for_geometry = Arc::clone(&session_mgr);
+        // 窗口几何保存（防抖 600ms：拖动/缩放停下后读取最终值落盘，值未变时管理器跳过写盘）。
+        let spawn_geometry_save = {
+          let mgr_geo = Arc::clone(&mgr_for_geometry);
+          let app_geo = app.handle().clone();
+          move || {
+            let mgr_inner = Arc::clone(&mgr_geo);
+            let app_inner = app_geo.clone();
+            tauri::async_runtime::spawn(async move {
+              tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+              if let Some(win) = app_inner.get_window("main") {
+                if let (Ok(pos), Ok(size)) = (win.outer_position(), win.inner_size()) {
+                  mgr_inner
+                    .save_window_geometry(storage::WindowGeometry {
+                      x: pos.x as f64,
+                      y: pos.y as f64,
+                      width: size.width as f64,
+                      height: size.height as f64,
+                    })
+                    .await;
+                }
+              }
+            });
+          }
+        };
         main_window.on_window_event(move |event| match event {
+          tauri::WindowEvent::Moved(_) => {
+            spawn_geometry_save();
+          }
           tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. } => {
+            spawn_geometry_save();
             let app_inner = app_for_resize.clone();
             let mgr_inner = Arc::clone(&mgr_for_resize);
             tauri::async_runtime::spawn(async move {
@@ -258,6 +327,9 @@ pub fn run() {
       select_provider,
       add_account,
       rename_account,
+      set_account_note,
+      retry_account_view,
+      refresh_all_quotas,
       remove_account,
       switch_account,
       set_modal_active,

@@ -42,6 +42,9 @@ export interface AccountRecord {
   authState: AuthState;
   quotaSyncedAtMs: number | null;
   quotaStale: boolean;
+  note: string;
+  sessionState: string;
+  viewError: boolean;
 }
 
 export interface ConflictItem {
@@ -65,6 +68,7 @@ export interface ManagerSnapshot {
   proxyUrl: string | null;
   warmViewLimit: number | null;
   proxyFollowSystem: boolean;
+  warmViewCount: number;
 }
 
 export interface UpdateCheckResult {

@@ -16,7 +16,7 @@ import type {
 type ModalMode =
   | { kind: "none" }
   | { kind: "add"; providerId: ProviderId; draft: string }
-  | { kind: "rename"; account: AccountRecord; draft: string }
+  | { kind: "rename"; account: AccountRecord; draft: string; noteDraft: string }
   | { kind: "remove"; account: AccountRecord }
   | { kind: "proxy"; draft: string; warmLimit: string; followSystem: boolean }
   | { kind: "update" };
@@ -601,6 +601,8 @@ function renderModal(provider: ProviderInfo): string {
           <div class="modal-title">修改备注名称</div>
           <div class="modal-desc">仅更新本机列表中的显示名称，不影响已登录的官方会话。</div>
           <input id="modal-alias-input" class="modal-input" maxlength="60" placeholder="输入新的备注名称" value="${escapeHtml(modal.draft)}" />
+          <div class="modal-desc" style="margin-top:14px;">账号备注：自由文本（如「工作号 · 客户 A 项目」），显示在账号列表与托盘菜单中，方便区分每个号的用途。</div>
+          <input id="modal-note-input" class="modal-input" maxlength="200" placeholder="输入备注（可留空）" value="${escapeHtml(modal.noteDraft)}" />
           <div class="modal-footer">
             <button id="modal-cancel-btn" class="btn" type="button">取消</button>
             <button id="modal-confirm-btn" class="btn primary" type="button">保存</button>
@@ -629,6 +631,7 @@ function renderModal(provider: ProviderInfo): string {
             <option value="12" ${modal.warmLimit === "12" ? "selected" : ""}>12 个</option>
             <option value="0" ${modal.warmLimit === "0" ? "selected" : ""}>不限</option>
           </select>
+          ${snapshot ? `<div class="modal-desc" style="margin-top:10px;">当前保活视图：${snapshot.warmViewCount} 个（上限 ${snapshot.warmViewLimit === null ? "默认 6" : snapshot.warmViewLimit === 0 ? "不限" : snapshot.warmViewLimit}）</div>` : ""}
           <div class="modal-footer">
             <button id="modal-cancel-btn" class="btn" type="button">取消</button>
             <button id="modal-confirm-btn" class="btn primary" type="button">保存</button>
@@ -684,7 +687,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
 
   const headerBtnHtml = provider.enabled
     ? `
-      <button id="sync-all-btn" class="ghost-icon-btn" type="button" title="刷新已就绪账号额度">${ICON_REFRESH}</button>
+      <button id="sync-all-btn" class="ghost-icon-btn" type="button" title="刷新全部账号额度">${ICON_REFRESH}</button>
       <button id="open-site-btn" class="ghost-icon-btn" type="button" title="在浏览器中打开 ${escapeHtml(provider.shortName)} 官网">${ICON_EXTERNAL}</button>
       <button id="add-account-btn" class="icon-btn primary" type="button">+ 新增</button>
     `
@@ -706,18 +709,34 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
           resolveQuotaState(a).status !== "critical"
       )
       .sort((x, y) => (y.quotaPercent ?? 0) - (x.quotaPercent ?? 0))[0] ?? null;
+  const waitingAccounts = providerAccounts.filter(
+    (a) => a.sessionState === "waiting" && a.authState !== "logged_out"
+  );
+  const depletedOther = loggedInAccounts.find(
+    (a) =>
+      a !== activeAcc &&
+      resolveQuotaState(a).status === "critical" &&
+      Boolean(a.quotaDetail?.planSubtext)
+  );
   let overviewHtml = "";
-  if (providerAccounts.length >= 2) {
+  if (waitingAccounts.length > 0) {
+    const first = waitingAccounts[0];
+    overviewHtml = `
+      <div class="quota-overview waiting">
+        <span>${waitingAccounts.length} 个账号待审批</span>
+        <button class="mini-btn overview-switch-btn" data-switch-uuid="${escapeHtml(first.uuid)}" type="button">切到「${escapeHtml(first.alias)}」处理</button>
+      </div>`;
+  } else if (providerAccounts.length >= 2) {
     if (activeDepleted && recommended) {
       overviewHtml = `
       <div class="quota-overview depleted">
-        <span>当前账号额度已用尽</span>
+        <span>当前账号额度已用尽${activeAcc?.quotaDetail?.planSubtext ? ` · ${escapeHtml(activeAcc.quotaDetail.planSubtext)}` : ""}</span>
         <button class="mini-btn overview-switch-btn" data-switch-uuid="${escapeHtml(recommended.uuid)}" type="button">切到「${escapeHtml(recommended.alias)}」（剩余 ${recommended.quotaPercent}%）</button>
       </div>`;
     } else if (recommended) {
       overviewHtml = `
       <div class="quota-overview">
-        <span>${loggedInAccounts.length} 个已登录 · 推荐「${escapeHtml(recommended.alias)}」（剩余 ${recommended.quotaPercent}%）</span>
+        <span>${loggedInAccounts.length} 个已登录 · 推荐「${escapeHtml(recommended.alias)}」（剩余 ${recommended.quotaPercent}%）${depletedOther ? ` · 「${escapeHtml(depletedOther.alias)}」已用尽，${escapeHtml(depletedOther.quotaDetail!.planSubtext!)}` : ""}</span>
         <button class="mini-btn overview-switch-btn" data-switch-uuid="${escapeHtml(recommended.uuid)}" type="button">切过去</button>
       </div>`;
     } else if (loggedInAccounts.length > 0) {
@@ -768,13 +787,25 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
           idx < 9
             ? `<span class="shortcut-pill" title="快捷切号">${isMac ? "⌘" : "^"}${idx + 1}</span>`
             : "";
+        const sessionBadgeHtml = isLoggedOut
+          ? ""
+          : acc.sessionState === "waiting"
+            ? `<span class="session-badge waiting">待审批</span>`
+            : acc.sessionState === "working"
+              ? `<span class="session-badge working">工作中</span>`
+              : acc.sessionState === "done"
+                ? `<span class="session-badge done">已完成</span>`
+                : "";
+
         const alertBadgeHtml = isLoggedOut
           ? `<span class="auth-status-badge">未登录</span>`
           : acc.quotaStale
             ? `<span class="quota-warning-badge stale" title="连续多次未抓到额度，页面结构可能已变化，当前显示的额度可能不准">抓取异常</span>`
-            : alertStatus !== "normal"
-              ? `<span class="quota-warning-badge ${alertStatus}">${alertLabel}</span>`
-              : "";
+            : acc.viewError
+              ? `<span class="quota-warning-badge stale" title="该账号的保活视图预热失败，额度可能不刷新，点行尾的刷新按钮重试">视图异常</span>`
+              : alertStatus !== "normal"
+                ? `<span class="quota-warning-badge ${alertStatus}">${alertLabel}</span>`
+                : "";
 
         const syncNoteHtml =
           !isLoggedOut &&
@@ -835,11 +866,12 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
           ? `<div class="avatar has-photo"><img src="${escapeHtml(acc.avatarUrl)}" class="avatar-photo" alt="" draggable="false" /></div>`
           : `<div class="${avatarClass}">${escapeHtml(avatarText)}</div>`;
 
+        const searchText = `${acc.alias} ${acc.note}`.toLowerCase();
         const searchHidden =
           accountSearchQuery.trim() !== "" &&
-          !acc.alias.toLowerCase().includes(accountSearchQuery.trim().toLowerCase());
+          !searchText.includes(accountSearchQuery.trim().toLowerCase());
         return `
-          <div class="${rowClass}" data-switch-uuid="${escapeHtml(acc.uuid)}" data-search-text="${escapeHtml(acc.alias.toLowerCase())}" ${searchHidden ? `style="display:none;"` : ""}>
+          <div class="${rowClass}" data-switch-uuid="${escapeHtml(acc.uuid)}" data-search-text="${escapeHtml(searchText)}" ${searchHidden ? `style="display:none;"` : ""}>
             <div class="account-header">
               <div class="avatar-wrap">
                 ${avatarNodeHtml}
@@ -850,12 +882,15 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
                 <div class="account-alias-row">
                   <span class="account-alias">${escapeHtml(acc.alias)}</span>
                   ${shortcutHint}
+                  ${sessionBadgeHtml}
                   ${alertBadgeHtml}
                 </div>
+                ${acc.note.trim() ? `<div class="account-note" title="${escapeHtml(acc.note)}">${escapeHtml(acc.note)}</div>` : ""}
                 ${compactSubHtml}
                 ${syncNoteHtml}
               </div>
               <div class="row-ops">
+                ${acc.viewError && !isLoggedOut ? `<button class="action-icon-btn" data-retry-uuid="${escapeHtml(acc.uuid)}" title="视图预热失败，点此重试" type="button">${ICON_REFRESH}</button>` : ""}
                 <button class="action-icon-btn" data-browser-uuid="${escapeHtml(acc.uuid)}" title="在默认浏览器打开官网（独立会话，作备用入口）" type="button">${ICON_EXTERNAL}</button>
                 <button class="action-icon-btn" data-rename-uuid="${escapeHtml(acc.uuid)}" title="修改备注" type="button">${ICON_EDIT}</button>
                 <button class="action-icon-btn danger" data-remove-uuid="${escapeHtml(acc.uuid)}" title="从本机移除" type="button">${ICON_TRASH}</button>
@@ -884,9 +919,15 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
     </div>
     ${noticeHtml}
     ${conflictsHtml}
-    ${providerAccounts.length >= 5 ? `<div class="account-search-row"><input id="account-search-input" class="account-search" type="text" placeholder="搜索账号（别名 / 邮箱）" value="${escapeHtml(accountSearchQuery)}" /></div>` : ""}
+    ${providerAccounts.length >= 5 ? `<div class="account-search-row"><input id="account-search-input" class="account-search" type="text" placeholder="搜索账号（别名 / 备注）" value="${escapeHtml(accountSearchQuery)}" /></div>` : ""}
     ${overviewHtml}
     <div class="account-list">${listBody}</div>
+    <div class="column-footer">
+      <span class="footer-brand"><img src="/logos/app-logo.svg" alt="" class="footer-brand-img" draggable="false" />叠号</span>
+      <span class="footer-spacer"></span>
+      <button id="proxy-settings-btn" class="footer-util-btn ${state.proxyUrl ? "proxy-active" : ""}" title="${state.proxyUrl ? `代理：${escapeHtml(state.proxyUrl)}` : "代理设置"}" type="button">${ICON_PROXY}<span>代理</span>${state.proxyUrl ? `<span class="update-dot"></span>` : ""}</button>
+      <button id="check-update-btn" class="footer-util-btn ${updateState.result?.hasUpdate ? "has-update" : ""}" title="${updateState.result?.hasUpdate ? `发现新版本 v${escapeHtml(updateState.result.latestVersion)}` : "检查更新"}" type="button">${ICON_UPDATE}<span>更新</span>${updateState.result?.hasUpdate ? `<span class="update-dot"></span>` : ""}</button>
+    </div>
     ${renderModal(provider)}
   `;
 }
@@ -949,50 +990,6 @@ function render(): void {
 
     root.innerHTML = `
       <div class="desktop-shell">
-        <aside class="service-rail">
-          <div class="rail-brand" title="叠号 · AI 助手账号切换器">
-            <img src="/logos/app-logo.svg" alt="叠号" class="rail-brand-img" draggable="false" />
-          </div>
-          <div class="rail-divider"></div>
-          ${snapshot.providers
-            .map(
-              (p) => `
-              <button class="rail-btn ${p.id === provider.id ? "active" : ""} ${!p.enabled ? "disabled" : ""}" data-provider="${escapeHtml(p.id)}" title="${escapeHtml(p.name)}" type="button">
-                <div class="rail-logo-box">${renderProviderLogo(p.id, "rail-logo-img")}</div>
-                <span class="rail-label">${escapeHtml(p.shortName)}</span>
-                ${!p.enabled ? `<span class="rail-pending-tag">待接入</span>` : ""}
-              </button>
-            `
-            )
-            .join("")}
-          <div class="rail-footer">
-            ${
-              snapshot.platform === "macos"
-                ? `
-            <button
-              id="proxy-settings-btn"
-              class="rail-util-btn ${snapshot.proxyUrl ? "proxy-active" : ""}"
-              title="${snapshot.proxyUrl ? `代理：${escapeHtml(snapshot.proxyUrl)}` : "代理设置（仅 macOS）"}"
-              type="button"
-            >
-              ${ICON_PROXY}
-              <span class="rail-util-label">代理</span>
-              ${snapshot.proxyUrl ? `<span class="update-dot"></span>` : ""}
-            </button>`
-                : ""
-            }
-            <button
-              id="check-update-btn"
-              class="rail-util-btn ${updateState.result?.hasUpdate ? "has-update" : ""}"
-              title="${updateState.result?.hasUpdate ? `发现新版本 v${escapeHtml(updateState.result.latestVersion)}` : "检查更新"}"
-              type="button"
-            >
-              ${ICON_UPDATE}
-              <span class="rail-util-label">更新</span>
-              ${updateState.result?.hasUpdate ? `<span class="update-dot"></span>` : ""}
-            </button>
-          </div>
-        </aside>
         <section class="middle-column">
           ${renderMiddleContent(snapshot, provider)}
         </section>
@@ -1005,17 +1002,6 @@ function render(): void {
 }
 
 function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
-  document.querySelectorAll<HTMLElement>("[data-provider]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const nextId = btn.dataset.provider as ProviderId;
-      if (!nextId || nextId === state.selectedProviderId) return;
-      if (modal.kind !== "none") {
-        await setModal({ kind: "none" });
-      }
-      await callCommand("select_provider", { providerId: nextId });
-    });
-  });
-
   const openOfficial = async () => {
     await callCommand("open_official_site", { providerId: provider.id });
   };
@@ -1026,7 +1012,7 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     const btn = document.querySelector("#sync-all-btn");
     btn?.classList.add("spinning");
     try {
-      await callCommand("trigger_quota_sync");
+      await callCommand("refresh_all_quotas");
     } finally {
       setTimeout(() => btn?.classList.remove("spinning"), 650);
     }
@@ -1101,6 +1087,16 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     });
   });
 
+  document.querySelectorAll<HTMLElement>("[data-retry-uuid]").forEach((btn) => {
+    btn.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      const uuid = btn.dataset.retryUuid;
+      if (uuid) {
+        await callCommand("retry_account_view", { providerId: provider.id, uuid });
+      }
+    });
+  });
+
   document.querySelectorAll<HTMLElement>("[data-rename-uuid]").forEach((btn) => {
     btn.addEventListener("click", async (ev) => {
       ev.stopPropagation();
@@ -1111,6 +1107,7 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
           kind: "rename",
           account: acc,
           draft: acc.autoAlias ? "" : acc.alias,
+          noteDraft: acc.note,
         });
       }
     });
@@ -1171,6 +1168,13 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
       modal.draft = aliasInput.value;
     }
   });
+
+  const noteInput = document.querySelector<HTMLInputElement>("#modal-note-input");
+  noteInput?.addEventListener("input", () => {
+    if (modal.kind === "rename") {
+      modal.noteDraft = noteInput.value;
+    }
+  });
   aliasInput?.addEventListener("keydown", async (ev) => {
     if (ev.key === "Enter") {
       ev.preventDefault();
@@ -1198,12 +1202,21 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     } else if (currentModal.kind === "rename") {
       const alias = currentModal.draft.trim();
       if (!alias) return;
+      const noteChanged = currentModal.noteDraft !== currentModal.account.note;
+      const note = currentModal.noteDraft;
       await setModal({ kind: "none" });
       await callCommand("rename_account", {
         providerId: currentModal.account.providerId,
         uuid: currentModal.account.uuid,
         alias,
       });
+      if (noteChanged) {
+        await callCommand("set_account_note", {
+          providerId: currentModal.account.providerId,
+          uuid: currentModal.account.uuid,
+          note,
+        });
+      }
     } else if (currentModal.kind === "remove") {
       await setModal({ kind: "none" });
       await callCommand("remove_account", {

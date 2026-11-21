@@ -455,9 +455,40 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
         localStorage.removeItem('__maam_cached_quota__');
         localStorage.removeItem('__maam_cached_quota_detail_v2__');
       } catch (_) {}
-      return JSON.stringify({ auth: false, loggedOut: true, typed: typed || phone, email: '', avatar: '', quotaText: '', quotaPct: null, quotaDetail: null, pendingHotkey });
+      return JSON.stringify({ auth: false, loggedOut: true, typed: typed || phone, email: '', avatar: '', quotaText: '', quotaPct: null, quotaDetail: null, sessionState: 'unknown', pendingHotkey });
     };
-    const makeLoading = () => JSON.stringify({ auth: false, loggedOut: false, typed: typed || phone, email: '', avatar: '', quotaText: '', quotaPct: null, quotaDetail: null, pendingHotkey });
+    const makeLoading = () => JSON.stringify({ auth: false, loggedOut: false, typed: typed || phone, email: '', avatar: '', quotaText: '', quotaPct: null, quotaDetail: null, sessionState: 'unknown', pendingHotkey });
+    // 会话状态启发式检测（仅 muse.ai）：waiting=页面上有审批请求，
+    // working=正在生成（有停止按钮），active=有可用的会话输入框，idle=其他。
+    const detectSessionState = () => {
+      try {
+        if (!(host === 'muse.ai' || host.endsWith('.muse.ai'))) return 'unknown';
+        const vis = (el) => {
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2) return false;
+          const st = window.getComputedStyle(el);
+          return st.display !== 'none' && st.visibility !== 'hidden';
+        };
+        const btnText = (el) => (((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')).trim());
+        const buttons = Array.from(document.querySelectorAll('button, [role="button"]')).filter(vis);
+        const approveRe = /^(允许|批准|同意|确认|运行|执行|allow|approve|accept|run|yes)/i;
+        const denyRe = /^(拒绝|取消|不允许|deny|reject|cancel|no)/i;
+        const hasApprove = buttons.some((b) => approveRe.test(btnText(b)));
+        const hasDeny = buttons.some((b) => denyRe.test(btnText(b)));
+        const bodyTxt = (document.body && document.body.innerText) || '';
+        const approvalHint = /需要你的批准|需要批准|等待批准|请求批准|wants to run|needs your approval|permission to/i.test(bodyTxt);
+        if ((hasApprove && hasDeny) || (approvalHint && (hasApprove || hasDeny))) return 'waiting';
+        const hasStop = buttons.some((b) => /停止|stop/i.test(btnText(b)));
+        if (hasStop) return 'working';
+        if (/正在思考|正在生成|thinking\.\.\.|working on it/i.test(bodyTxt)) return 'working';
+        const hasComposer = Array.from(document.querySelectorAll('textarea, [contenteditable="true"]')).some(vis);
+        if (hasComposer) return 'active';
+        return 'idle';
+      } catch (_) {
+        return 'unknown';
+      }
+    };
     if (document.readyState !== 'complete') {
       return makeLoading();
     }
@@ -713,10 +744,11 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
       quotaText: quota.text || '',
       quotaPct: quota.pct,
       quotaDetail: quota.detail || null,
+      sessionState: detectSessionState(),
       pendingHotkey
     });
   } catch (_) {
-    return JSON.stringify({ auth: false, loggedOut: false, typed: '', email: '', avatar: '', quotaText: '', quotaPct: null, quotaDetail: null, pendingHotkey: null });
+    return JSON.stringify({ auth: false, loggedOut: false, typed: '', email: '', avatar: '', quotaText: '', quotaPct: null, quotaDetail: null, sessionState: 'unknown', pendingHotkey: null });
   }
 })()"#;
 
@@ -738,6 +770,7 @@ pub struct ManagerSnapshot {
   pub proxy_url: Option<String>,
   pub warm_view_limit: Option<u32>,
   pub proxy_follow_system: bool,
+  pub warm_view_count: u32,
 }
 
 #[allow(dead_code)]
@@ -786,6 +819,7 @@ struct InnerState {
   notice: Option<String>,
   modal_active: bool,
   quota_miss: HashMap<AccountKey, u32>,
+  session_states: HashMap<AccountKey, String>,
   #[cfg(desktop)]
   transient_probes: HashSet<(AccountKey, u64)>,
   #[cfg(desktop)]
@@ -800,12 +834,14 @@ pub struct SessionManager {
   view_counter: AtomicU64,
   last_sync_timestamp: AtomicU64,
   inner: Mutex<InnerState>,
+  initial_window_geometry: Option<crate::storage::WindowGeometry>,
 }
 
 impl SessionManager {
   pub fn new(app_data_dir: PathBuf) -> Self {
     let store_path = app_data_dir.join("accounts.json");
     let loaded = load_or_migrate_store(&store_path);
+    let initial_window_geometry = loaded.store.window_geometry;
     let initial_provider = loaded
       .store
       .last_committed
@@ -819,6 +855,7 @@ impl SessionManager {
       active_view_id: Arc::new(AtomicU64::new(0)),
       view_counter: AtomicU64::new(1),
       last_sync_timestamp: AtomicU64::new(0),
+      initial_window_geometry,
       inner: Mutex::new(InnerState {
         store_path,
         app_data_dir,
@@ -835,6 +872,7 @@ impl SessionManager {
         notice: loaded.startup_notice,
         modal_active: false,
         quota_miss: HashMap::new(),
+        session_states: HashMap::new(),
         #[cfg(desktop)]
         transient_probes: HashSet::new(),
         #[cfg(desktop)]
@@ -843,6 +881,21 @@ impl SessionManager {
         quota_probe_running: false,
       }),
     }
+  }
+
+  /// 启动时读到的已保存窗口几何（供 setup 恢复窗口大小/位置）。
+  pub fn initial_window_geometry(&self) -> Option<crate::storage::WindowGeometry> {
+    self.initial_window_geometry
+  }
+
+  /// 保存窗口几何到 accounts.json（值未变化时跳过写盘）。
+  pub async fn save_window_geometry(&self, geo: crate::storage::WindowGeometry) {
+    let mut locked = self.inner.lock().await;
+    if locked.store.window_geometry == Some(geo) {
+      return;
+    }
+    locked.store.window_geometry = Some(geo);
+    let _ = save_store_atomic(&locked.store_path, &locked.store);
   }
 
   fn snapshot_from_locked(locked: &InnerState) -> ManagerSnapshot {
@@ -867,7 +920,22 @@ impl SessionManager {
         uuid: acc.uuid.clone(),
       };
       acc.quota_stale = locked.quota_miss.get(&k).map(|n| *n >= 3).unwrap_or(false);
+      acc.session_state = locked
+        .session_states
+        .get(&k)
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
+      #[cfg(desktop)]
+      if locked.prewarm_failed.contains(&k) {
+        acc.view_error = true;
+      }
     }
+
+    #[cfg(desktop)]
+    let warm_view_count = locked.warm_pool.len() as u32
+      + if locked.active_slot.is_some() { 1 } else { 0 };
+    #[cfg(not(desktop))]
+    let warm_view_count = 0u32;
 
     ManagerSnapshot {
       platform: current_platform_name(),
@@ -885,6 +953,7 @@ impl SessionManager {
       proxy_url: locked.store.proxy_url.clone(),
       warm_view_limit: locked.store.warm_view_limit,
       proxy_follow_system: locked.store.proxy_follow_system,
+      warm_view_count,
     }
   }
 
@@ -915,11 +984,27 @@ impl SessionManager {
           None => "额度未知".to_string(),
         },
       };
+      let note_suffix = {
+        let n = acc.note.trim();
+        if n.is_empty() {
+          String::new()
+        } else {
+          format!("（{}）", n.chars().take(12).collect::<String>())
+        }
+      };
+      let session_suffix = match acc.session_state.as_str() {
+        "waiting" => " · 待审批",
+        "working" => " · 工作中",
+        "done" => " · 已完成",
+        _ => "",
+      };
       let label = format!(
-        "{}{} · {}",
+        "{}{}{} · {}{}",
         if is_active { "✓ " } else { "" },
         acc.alias,
-        state_text
+        note_suffix,
+        state_text,
+        session_suffix
       );
       if let Ok(item) = MenuItem::with_id(
         app,
@@ -1337,6 +1422,9 @@ impl SessionManager {
         auth_state: AuthState::LoggedOut,
         quota_synced_at_ms: None,
         quota_stale: false,
+        note: String::new(),
+        session_state: "unknown".to_string(),
+        view_error: false,
       });
       save_store_atomic(&locked.store_path, &locked.store)?;
       locked.selected_provider_id = provider_id;
@@ -1382,6 +1470,138 @@ impl SessionManager {
     }
 
     Ok(Self::snapshot_from_locked(&locked))
+  }
+
+  /// 设置账号备注（自由文本，最多 200 字；与别名分开保存）。
+  pub async fn set_account_note(
+    &self,
+    raw_provider: &str,
+    raw_uuid: &str,
+    raw_note: &str,
+  ) -> Result<ManagerSnapshot, String> {
+    let provider_id = ProviderId::parse(raw_provider).ok_or_else(|| "无效的服务标识".to_string())?;
+    let uuid = normalize_uuid(raw_uuid).ok_or_else(|| "无效的账号 UUID".to_string())?;
+    let note: String = raw_note.trim().chars().take(200).collect();
+
+    let mut locked = self.inner.lock().await;
+    let target = locked
+      .store
+      .accounts
+      .iter_mut()
+      .find(|a| a.provider_id == provider_id && a.uuid == uuid)
+      .ok_or_else(|| "未找到匹配的账号记录".to_string())?;
+    target.note = note;
+    save_store_atomic(&locked.store_path, &locked.store)?;
+    Ok(Self::snapshot_from_locked(&locked))
+  }
+
+  /// 重试某个预热失败账号的视图：清掉失败标记并重新预热。
+  #[cfg(desktop)]
+  pub async fn retry_account_view(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    raw_provider: &str,
+    raw_uuid: &str,
+  ) -> Result<ManagerSnapshot, String> {
+    let provider_id = ProviderId::parse(raw_provider).ok_or_else(|| "无效的服务标识".to_string())?;
+    let uuid = normalize_uuid(raw_uuid).ok_or_else(|| "无效的账号 UUID".to_string())?;
+    let key = AccountKey {
+      provider_id,
+      uuid: uuid.clone(),
+    };
+    let account = {
+      let mut locked = self.inner.lock().await;
+      locked.prewarm_failed.remove(&key);
+      locked
+        .store
+        .accounts
+        .iter()
+        .find(|a| a.provider_id == provider_id && a.uuid == uuid)
+        .cloned()
+        .ok_or_else(|| "未找到匹配的账号记录".to_string())?
+    };
+    let mgr = Arc::clone(self);
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+      let _ = mgr.prewarm_desktop_account(&app_handle, account).await;
+    });
+    Ok(self.get_snapshot().await)
+  }
+
+  /// 全部刷新：已就绪视图立即刷新额度，冷账号重置轮换游标并启动一轮临时探测。
+  pub async fn refresh_all_quotas(
+    self: &Arc<Self>,
+    app: &AppHandle,
+  ) -> Result<ManagerSnapshot, String> {
+    {
+      let mut locked = self.inner.lock().await;
+      #[cfg(desktop)]
+      {
+        locked.quota_probe_cursor = 0;
+      }
+      locked.quota_miss.clear();
+    }
+    self.trigger_silent_sync(app, true).await;
+    Ok(self.get_snapshot().await)
+  }
+
+  /// 会话状态跃迁处理：探针回报 working / waiting / active / idle，
+  /// 本方法结合上一状态推导 done（工作中→静止）与 idle（done→静止），
+  /// 进入「待审批」或「已完成」时发系统通知（当前前台账号不打扰）。
+  async fn apply_session_state(&self, app: &AppHandle, key: AccountKey, raw: &str) {
+    let raw = match raw {
+      "working" | "waiting" | "active" | "idle" => raw,
+      _ => return,
+    };
+    let (snap, notice) = {
+      let mut locked = self.inner.lock().await;
+      let prev = locked
+        .session_states
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
+      let next = match (prev.as_str(), raw) {
+        ("working", "active") => "done",
+        (_, "active") => "idle",
+        (_, s) => s,
+      };
+      if next == prev {
+        return;
+      }
+      locked.session_states.insert(key.clone(), next.to_string());
+      let is_foreground = locked
+        .active_slot
+        .as_ref()
+        .map(|slot| slot.committed && slot.account_key == key)
+        .unwrap_or(false);
+      let alias = locked
+        .store
+        .accounts
+        .iter()
+        .find(|a| a.provider_id == key.provider_id && a.uuid == key.uuid)
+        .map(|a| a.alias.clone())
+        .unwrap_or_default();
+      let notice = if is_foreground {
+        None
+      } else if next == "waiting" {
+        Some((
+          format!("「{alias}」需要你审批"),
+          "会话正在等待批准，可从托盘菜单或账号列表快速切过去处理。".to_string(),
+        ))
+      } else if next == "done" {
+        Some((
+          format!("「{alias}」的会话已完成"),
+          "可以切过去查看结果了。".to_string(),
+        ))
+      } else {
+        None
+      };
+      (Self::snapshot_from_locked(&locked), notice)
+    };
+    self.emit_snapshot(app, &snap);
+    if let Some((title, body)) = notice {
+      Self::notify(app, &title, &body);
+    }
   }
 
   pub async fn remove_account(
@@ -1716,6 +1936,9 @@ impl SessionManager {
           tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(850)).await;
             if let Some(probe) = Self::eval_identity_probe(&wv).await {
+              mgr
+                .apply_session_state(&app_handle, key.clone(), &probe.session_state)
+                .await;
               if probe.is_auth {
                 let resolved_identity = if !probe.email.is_empty() {
                   Some(probe.email)
@@ -1873,6 +2096,9 @@ impl SessionManager {
       tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
 
       if let Some(probe) = Self::eval_identity_probe(&created_wv).await {
+        self
+          .apply_session_state(app, key.clone(), &probe.session_state)
+          .await;
         if probe.is_auth {
           let resolved_identity = if !probe.email.is_empty() {
             Some(probe.email)
@@ -3000,6 +3226,10 @@ impl SessionManager {
           continue;
         };
 
+        mgr
+          .apply_session_state(&app, key.clone(), &probe.session_state)
+          .await;
+
         if let Some(idx) = probe.pending_hotkey {
           let mgr_hotkey = Arc::clone(&mgr);
           let app_hotkey = app.clone();
@@ -3127,6 +3357,12 @@ impl SessionManager {
       .get("pendingHotkey")
       .and_then(|v| v.as_u64())
       .map(|n| n as u8);
+    let session_state = val
+      .get("sessionState")
+      .and_then(|v| v.as_str())
+      .unwrap_or("unknown")
+      .trim()
+      .to_string();
 
     Some(DesktopProbeResult {
       is_auth,
@@ -3138,6 +3374,7 @@ impl SessionManager {
       quota_pct,
       quota_detail,
       pending_hotkey,
+      session_state,
     })
   }
 
@@ -3417,4 +3654,5 @@ struct DesktopProbeResult {
   quota_pct: Option<u8>,
   quota_detail: Option<QuotaDetail>,
   pending_hotkey: Option<u8>,
+  session_state: String,
 }

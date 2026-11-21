@@ -70,6 +70,26 @@ pub struct AccountRecord {
   pub quota_synced_at_ms: Option<u64>,
   #[serde(default)]
   pub quota_stale: bool,
+  /// 用户备注（自由文本，如「工作号 / 客户项目」），与别名分开保存。
+  #[serde(default)]
+  pub note: String,
+  /// 会话状态（运行时探针注入快照，落盘副本恒为 unknown）：
+  /// unknown / idle / working / waiting / done。
+  #[serde(default)]
+  pub session_state: String,
+  /// 视图预热失败标记（运行时注入快照，落盘副本恒为 false）。
+  #[serde(default)]
+  pub view_error: bool,
+}
+
+/// 主窗口几何（逻辑像素的位置与尺寸），用于重启后恢复窗口大小/位置。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowGeometry {
+  pub x: f64,
+  pub y: f64,
+  pub width: f64,
+  pub height: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +112,8 @@ pub struct AccountsStoreFile {
   pub warm_view_limit: Option<u32>,
   #[serde(default)]
   pub proxy_follow_system: bool,
+  #[serde(default)]
+  pub window_geometry: Option<WindowGeometry>,
 }
 
 impl Default for AccountsStoreFile {
@@ -104,6 +126,7 @@ impl Default for AccountsStoreFile {
       proxy_url: None,
       warm_view_limit: None,
       proxy_follow_system: false,
+      window_geometry: None,
     }
   }
 }
@@ -313,6 +336,13 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
           .or_else(|| item_obj.get("quota_synced_at_ms"))
           .and_then(|v| v.as_u64()),
         quota_stale: false,
+        note: item_obj
+          .get("note")
+          .and_then(|v| v.as_str())
+          .unwrap_or("")
+          .to_string(),
+        session_state: "unknown".to_string(),
+        view_error: false,
       });
     }
   }
@@ -359,6 +389,13 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
     .and_then(|s| normalize_proxy_url(s).ok())
     .flatten();
 
+  let window_geometry = obj
+    .get("windowGeometry")
+    .or_else(|| obj.get("window_geometry"))
+    .filter(|v| !v.is_null())
+    .and_then(|v| serde_json::from_value::<WindowGeometry>(v.clone()).ok())
+    .filter(|g| g.width >= 760.0 && g.height >= 520.0 && g.width <= 6000.0 && g.height <= 4000.0);
+
   Ok((
     AccountsStoreFile {
       version: STORE_VERSION,
@@ -368,6 +405,7 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
       proxy_url,
       warm_view_limit,
       proxy_follow_system,
+      window_geometry,
     },
     is_legacy,
   ))
