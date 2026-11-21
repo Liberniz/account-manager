@@ -732,15 +732,8 @@ function renderModal(provider: ProviderInfo): string {
             <input id="modal-proxy-follow" type="checkbox" ${modal.followSystem ? "checked" : ""} />
             <span>跟随系统代理：自动读取 macOS 系统代理设置（如 Clash / Surge 开启的系统代理），勾选后忽略上方手动地址</span>
           </label>
-          <div class="modal-desc" style="margin-top:14px;">保活视图上限：后台保持就绪的账号视图数量。越多切换越快、内存占用越高；冷账号的额度会通过临时视图轮流刷新，不占用保活名额。</div>
-          <select id="modal-warm-limit" class="modal-input">
-            <option value="" ${modal.warmLimit === "" ? "selected" : ""}>默认（6 个）</option>
-            <option value="4" ${modal.warmLimit === "4" ? "selected" : ""}>4 个</option>
-            <option value="8" ${modal.warmLimit === "8" ? "selected" : ""}>8 个</option>
-            <option value="10" ${modal.warmLimit === "10" ? "selected" : ""}>10 个</option>
-            <option value="12" ${modal.warmLimit === "12" ? "selected" : ""}>12 个</option>
-            <option value="0" ${modal.warmLimit === "0" ? "selected" : ""}>不限</option>
-          </select>
+          <div class="modal-desc" style="margin-top:14px;">保活视图上限（仅 Muse）：后台保持就绪的账号视图数量，可填 1-32 任意数值；留空 = 默认 6，填 0 = 不限。越多切换越快、内存占用越高；闲置超过 30 分钟的保活视图会自动回收，冷账号的额度会通过临时视图轮流刷新，不占用保活名额。TeleAgent / GLaDOS 不保活，离开即关、数据走接口刷新。</div>
+          <input id="modal-warm-limit" class="modal-input" type="number" min="0" max="32" step="1" placeholder="默认 6" value="${escapeHtml(modal.warmLimit)}" />
           ${snapshot ? `<div class="modal-desc" style="margin-top:10px;">当前保活视图：${snapshot.warmViewCount} 个（上限 ${snapshot.warmViewLimit === null ? "默认 6" : snapshot.warmViewLimit === 0 ? "不限" : snapshot.warmViewLimit}）</div>` : ""}
           <div class="modal-footer">
             <button id="modal-cancel-btn" class="btn" type="button">取消</button>
@@ -1626,12 +1619,19 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
       const proxyUrl = currentModal.draft.trim();
       const followEl = document.querySelector<HTMLInputElement>("#modal-proxy-follow");
       const followSystem = followEl ? followEl.checked : undefined;
-      const warmSel = document.querySelector<HTMLSelectElement>("#modal-warm-limit");
-      const warmLimit = warmSel
-        ? warmSel.value === ""
-          ? null
-          : parseInt(warmSel.value, 10)
-        : undefined;
+      const warmInput = document.querySelector<HTMLInputElement>("#modal-warm-limit");
+      let warmLimit: number | null | undefined;
+      if (warmInput) {
+        const raw = warmInput.value.trim();
+        if (raw === "") {
+          warmLimit = null;
+        } else {
+          const parsed = parseInt(raw, 10);
+          warmLimit = Number.isNaN(parsed)
+            ? undefined
+            : Math.max(0, Math.min(32, parsed));
+        }
+      }
       await setModal({ kind: "none" });
       await callCommand("set_proxy_url", { proxyUrl });
       if (warmLimit !== undefined && warmLimit !== snapshot?.warmViewLimit) {

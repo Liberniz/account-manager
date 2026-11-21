@@ -26,6 +26,19 @@ pub const APP_TITLE: &str = "叠号";
 const LEFT_PANE_WIDTH: f64 = 312.0; // 账号列宽度（v0.3.0 删除左侧栏后 = 中列 312，勿再加 rail 的 68）
 #[cfg(desktop)]
 const DEFAULT_WARM_DESKTOP_VIEWS: usize = 6;
+/// 暖视图闲置回收时限：非前台视图闲置超过此时长自动关闭（只关视图不删数据，
+/// 下次打开冷加载）。专治 SPA 长时间挂着的内存膨胀；工作中 / 待审批的不回收。
+#[cfg(desktop)]
+const WARM_VIEW_TTL_MS: u64 = 30 * 60 * 1000;
+/// TTL 回收后的预热冷却：刚被回收的账号一段时间内不被自动预热，避免关了又开。
+#[cfg(desktop)]
+const WARM_TTL_EVICT_COOLDOWN_MS: u64 = 60 * 60 * 1000;
+/// 隐藏（暖 / 探测）视图的创建尺寸上限：按小尺寸建、切到前台再放大到完整右栏，
+/// 减少离屏渲染的合成开销。宽度保留桌面布局量级，避免触发站点窄屏布局影响探针。
+#[cfg(desktop)]
+const HIDDEN_VIEW_MAX_WIDTH: f64 = 1100.0;
+#[cfg(desktop)]
+const HIDDEN_VIEW_MAX_HEIGHT: f64 = 720.0;
 
 /// TeleAgent 积分/签到接口（与桌面客户端同源的 sapi 网关）。
 const TELEAGENT_API_BASE: &str = "https://agent.teleai.com.cn/superCowork/sapi";
@@ -1072,6 +1085,7 @@ struct WarmDesktopEntry {
   captured_identity_hint: Option<String>,
   watcher_running: bool,
   last_used_ms: u64,
+  created_ms: u64,
   alive_flag: Arc<AtomicBool>,
 }
 
@@ -1093,6 +1107,8 @@ struct InnerState {
   last_active_per_provider: HashMap<ProviderId, AccountKey>,
   #[cfg(desktop)]
   warm_pool: HashMap<AccountKey, WarmDesktopEntry>,
+  #[cfg(desktop)]
+  warm_ttl_evicted_ms: HashMap<AccountKey, u64>,
   #[cfg(desktop)]
   prewarm_failed: HashSet<AccountKey>,
   pending_external_auth: Option<PendingExternalAuth>,
@@ -1146,6 +1162,8 @@ impl SessionManager {
         last_active_per_provider: HashMap::new(),
         #[cfg(desktop)]
         warm_pool: HashMap::new(),
+        #[cfg(desktop)]
+        warm_ttl_evicted_ms: HashMap::new(),
         #[cfg(desktop)]
         prewarm_failed: HashSet::new(),
         pending_external_auth: None,
@@ -1471,9 +1489,47 @@ impl SessionManager {
   fn warm_limit(locked: &InnerState) -> usize {
     match locked.store.warm_view_limit {
       Some(0) => usize::MAX,
-      Some(n) => (n as usize).clamp(2, 32),
+      Some(n) => (n as usize).clamp(1, 32),
       None => DEFAULT_WARM_DESKTOP_VIEWS,
     }
+  }
+
+  /// 哪些服务商的视图值得保活：Muse 页面重、加载慢且会话探针依赖活视图；
+  /// TeleAgent / GLaDOS 控制台轻、状态数据走 API 刷新，离开前台即关、不进暖池。
+  #[cfg(desktop)]
+  fn provider_warm_eligible(provider_id: ProviderId) -> bool {
+    matches!(provider_id, ProviderId::Muse)
+  }
+
+  /// 回收闲置超时的暖视图（TTL）：跳过前台视图，跳过工作中 / 待审批的账号
+  /// （这类视图的探针还在跟踪状态跃迁）。回收时刻记入冷却表，自动预热在
+  /// 冷却期内不会把刚关掉的账号又拉起来；冷却表顺手清掉过期条目防增长。
+  #[cfg(desktop)]
+  fn evict_expired_warm_views(app: &AppHandle, locked: &mut InnerState) {
+    let now = now_ms();
+    let active_key = locked.active_slot.as_ref().map(|s| s.account_key.clone());
+    let expired: Vec<AccountKey> = locked
+      .warm_pool
+      .iter()
+      .filter(|(k, entry)| {
+        Some(*k) != active_key.as_ref()
+          && now.saturating_sub(entry.last_used_ms.max(entry.created_ms)) > WARM_VIEW_TTL_MS
+          && !matches!(
+            locked.session_states.get(*k).map(|s| s.as_str()),
+            Some("working") | Some("waiting")
+          )
+      })
+      .map(|(k, _)| k.clone())
+      .collect();
+    for key in expired {
+      if let Some(entry) = locked.warm_pool.remove(&key) {
+        locked.warm_ttl_evicted_ms.insert(key, now);
+        Self::close_warm_entry(app, entry);
+      }
+    }
+    locked
+      .warm_ttl_evicted_ms
+      .retain(|_, ts| now.saturating_sub(*ts) <= WARM_TTL_EVICT_COOLDOWN_MS);
   }
 
   #[cfg(desktop)]
@@ -1508,7 +1564,13 @@ impl SessionManager {
       #[cfg(desktop)]
       {
         let _ = next_seq;
-        if let Some(entry) = locked.warm_pool.get_mut(&old_slot.account_key) {
+        if !Self::provider_warm_eligible(old_slot.account_key.provider_id) {
+          // 不保活的服务商（TeleAgent / GLaDOS）：离开前台直接关视图，
+          // 状态靠 API 刷新，下次打开冷加载，不占暖池名额。
+          if let Some(entry) = locked.warm_pool.remove(&old_slot.account_key) {
+            Self::close_warm_entry(app, entry);
+          }
+        } else if let Some(entry) = locked.warm_pool.get_mut(&old_slot.account_key) {
           if let Some(popup_label) = entry.popup_label.take() {
             if let Some(popup_win) = app.get_webview_window(&popup_label) {
               let _ = popup_win.close();
@@ -2997,6 +3059,7 @@ impl SessionManager {
         if force {
           locked.prewarm_failed.clear();
         }
+        Self::evict_expired_warm_views(app, &mut locked);
         locked
           .warm_pool
           .iter()
@@ -3226,8 +3289,8 @@ impl SessionManager {
     limit: Option<u32>,
   ) -> Result<ManagerSnapshot, String> {
     if let Some(n) = limit {
-      if n != 0 && !(2..=32).contains(&n) {
-        return Err("保活上限需为 2~32，或 0 表示不限".to_string());
+      if n != 0 && !(1..=32).contains(&n) {
+        return Err("保活上限需为 1~32，或 0 表示不限".to_string());
       }
     }
     let mut locked = self.inner.lock().await;
@@ -3668,7 +3731,10 @@ impl SessionManager {
     let right_w = (win_w - left_w).max(600.0);
     (
       tauri::LogicalPosition::new(win_w.max(2000.0) + 1000.0, 0.0),
-      tauri::LogicalSize::new(right_w, win_h.max(400.0)),
+      tauri::LogicalSize::new(
+        right_w.min(HIDDEN_VIEW_MAX_WIDTH),
+        win_h.clamp(400.0, HIDDEN_VIEW_MAX_HEIGHT),
+      ),
     )
   }
 
@@ -3723,6 +3789,7 @@ impl SessionManager {
           captured_identity_hint: None,
           watcher_running: false,
           last_used_ms: now_ms(),
+          created_ms: now_ms(),
           alive_flag: Arc::clone(&alive_flag),
         },
       );
@@ -4056,6 +4123,7 @@ impl SessionManager {
           captured_identity_hint: None,
           watcher_running: false,
           last_used_ms: 0,
+          created_ms: now_ms(),
           alive_flag: Arc::clone(&alive_flag),
         },
       );
@@ -4146,6 +4214,7 @@ impl SessionManager {
             .accounts
             .iter()
             .filter(|a| get_provider(a.provider_id).info.enabled)
+            .filter(|a| Self::provider_warm_eligible(a.provider_id))
             .find(|a| {
               let k = AccountKey {
                 provider_id: a.provider_id,
@@ -4154,6 +4223,11 @@ impl SessionManager {
               !locked.warm_pool.contains_key(&k)
                 && !locked.store.pending_cleanup.contains(&k)
                 && !locked.prewarm_failed.contains(&k)
+                && locked
+                  .warm_ttl_evicted_ms
+                  .get(&k)
+                  .map(|ts| now_ms().saturating_sub(*ts) > WARM_TTL_EVICT_COOLDOWN_MS)
+                  .unwrap_or(true)
             })
             .cloned()
         }
