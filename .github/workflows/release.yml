@@ -15,28 +15,10 @@ permissions:
   contents: read
 
 jobs:
-  desktop:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
+  macos:
+    name: macOS (Apple Silicon)
+    runs-on: macos-14
     timeout-minutes: 70
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macOS
-            runner: macos-15
-            targets: aarch64-apple-darwin,x86_64-apple-darwin
-            build: --target universal-apple-darwin --bundles app,dmg
-            artifact: macos-universal-dmg
-            path: |
-              src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
-              src-tauri/target/universal-apple-darwin/release/bundle/macos/account-manager-macos-universal.app.tar.gz
-          - name: Windows
-            runner: windows-2025
-            targets: x86_64-pc-windows-msvc
-            build: --target x86_64-pc-windows-msvc --bundles nsis
-            artifact: windows-x64-nsis
-            path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
     steps:
       - uses: actions/checkout@v7
         with:
@@ -47,32 +29,33 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.targets }}
+          targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ./src-tauri -> target
       - run: npm ci
-      - run: npm run tauri -- build ${{ matrix.build }} --ci
+      - run: npm run tauri -- build --target aarch64-apple-darwin --bundles app,dmg --ci
       - name: Pack macOS update archive
-        if: matrix.name == 'macOS'
         run: |
-          macos_dir="src-tauri/target/universal-apple-darwin/release/bundle/macos"
+          macos_dir="src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
           app_path=$(find "$macos_dir" -maxdepth 1 -name '*.app' -type d | head -n 1)
           if [ -z "$app_path" ]; then
             echo "macOS .app bundle not found" >&2
             exit 1
           fi
           app_name=$(basename "$app_path")
-          COPYFILE_DISABLE=1 tar -czf "$macos_dir/account-manager-macos-universal.app.tar.gz" -C "$macos_dir" "$app_name"
+          COPYFILE_DISABLE=1 tar -czf "$macos_dir/account-manager-macos-arm64.app.tar.gz" -C "$macos_dir" "$app_name"
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.path }}
+          name: macos-arm64-dmg
+          path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/account-manager-macos-arm64.app.tar.gz
           if-no-files-found: error
 
   publish:
     name: Publish Release
-    needs: [desktop]
+    needs: [macos]
     if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)
     runs-on: ubuntu-24.04
     permissions:
@@ -84,12 +67,8 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v7
         with:
-          name: macos-universal-dmg
+          name: macos-arm64-dmg
           path: ${{ runner.temp }}/artifacts/macos
-      - uses: actions/download-artifact@v7
-        with:
-          name: windows-x64-nsis
-          path: ${{ runner.temp }}/artifacts/windows
       - name: Prepare release assets and latest.json
         run: |
           pub_dir="$RUNNER_TEMP/publish"
@@ -97,15 +76,13 @@ jobs:
 
           mac_tar=$(find "$RUNNER_TEMP/artifacts/macos" -name '*.app.tar.gz' -type f | head -n 1)
           mac_dmg=$(find "$RUNNER_TEMP/artifacts/macos" -name '*.dmg' -type f | head -n 1)
-          win_exe=$(find "$RUNNER_TEMP/artifacts/windows" -name '*-setup.exe' -type f | head -n 1)
-          if [ -z "$mac_tar" ] || [ -z "$mac_dmg" ] || [ -z "$win_exe" ]; then
+          if [ -z "$mac_tar" ] || [ -z "$mac_dmg" ]; then
             echo "Missing required build artifact(s)" >&2
             exit 1
           fi
 
-          cp "$mac_tar" "$pub_dir/account-manager-macos-universal.app.tar.gz"
-          cp "$mac_dmg" "$pub_dir/account-manager-macos-universal.dmg"
-          cp "$win_exe" "$pub_dir/account-manager-windows-x64-setup.exe"
+          cp "$mac_tar" "$pub_dir/account-manager-macos-arm64.app.tar.gz"
+          cp "$mac_dmg" "$pub_dir/account-manager-macos-arm64.dmg"
 
           cfg_version=$(jq -r '.version' src-tauri/tauri.conf.json)
           if [ "${{ github.ref_type }}" = "tag" ]; then
@@ -116,10 +93,8 @@ jobs:
             tag="v${version}"
           fi
 
-          mac_sha=$(sha256sum "$pub_dir/account-manager-macos-universal.app.tar.gz" | awk '{print $1}')
-          mac_size=$(stat -c%s "$pub_dir/account-manager-macos-universal.app.tar.gz")
-          win_sha=$(sha256sum "$pub_dir/account-manager-windows-x64-setup.exe" | awk '{print $1}')
-          win_size=$(stat -c%s "$pub_dir/account-manager-windows-x64-setup.exe")
+          mac_sha=$(sha256sum "$pub_dir/account-manager-macos-arm64.app.tar.gz" | awk '{print $1}')
+          mac_size=$(stat -c%s "$pub_dir/account-manager-macos-arm64.app.tar.gz")
 
           base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
           pub_date=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -136,12 +111,9 @@ jobs:
             --arg notes "$notes" \
             --arg pub_date "$pub_date" \
             --arg release_page_url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${tag}" \
-            --arg mac_url "${base_url}/account-manager-macos-universal.app.tar.gz" \
+            --arg mac_url "${base_url}/account-manager-macos-arm64.app.tar.gz" \
             --arg mac_sha "$mac_sha" \
             --argjson mac_size "$mac_size" \
-            --arg win_url "${base_url}/account-manager-windows-x64-setup.exe" \
-            --arg win_sha "$win_sha" \
-            --argjson win_size "$win_size" \
             '{
               version: $version,
               notes: $notes,
@@ -151,14 +123,8 @@ jobs:
                 macos: {
                   url: $mac_url,
                   sha256: $mac_sha,
-                  filename: "account-manager-macos-universal.app.tar.gz",
+                  filename: "account-manager-macos-arm64.app.tar.gz",
                   size: $mac_size
-                },
-                windows: {
-                  url: $win_url,
-                  sha256: $win_sha,
-                  filename: "account-manager-windows-x64-setup.exe",
-                  size: $win_size
                 }
               }
             }' > "$pub_dir/latest.json"
@@ -171,9 +137,8 @@ jobs:
         run: |
           pub_dir="$RUNNER_TEMP/publish"
           files=(
-            "$pub_dir/account-manager-macos-universal.app.tar.gz"
-            "$pub_dir/account-manager-macos-universal.dmg"
-            "$pub_dir/account-manager-windows-x64-setup.exe"
+            "$pub_dir/account-manager-macos-arm64.app.tar.gz"
+            "$pub_dir/account-manager-macos-arm64.dmg"
             "$pub_dir/latest.json"
           )
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
