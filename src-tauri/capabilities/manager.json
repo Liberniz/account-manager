@@ -31,6 +31,9 @@
     "allow-trigger-quota-sync",
     "allow-check-for-updates",
     "allow-download-and-install-update",
-    "allow-open-external-url"
+    "allow-open-external-url",
+    "allow-get-notification-status",
+    "allow-send-test-notification",
+    "allow-open-notification-settings"
   ]
 }

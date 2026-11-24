@@ -24,6 +24,9 @@ const APP_COMMANDS: &[&str] = &[
   "check_for_updates",
   "download_and_install_update",
   "open_external_url",
+  "get_notification_status",
+  "send_test_notification",
+  "open_notification_settings",
 ];
 
 fn main() {
