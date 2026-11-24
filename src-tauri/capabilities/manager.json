@@ -41,6 +41,7 @@
     "allow-send-test-notification",
     "allow-open-notification-settings",
     "allow-search-global-chats",
-    "allow-open-global-chat"
+    "allow-open-global-chat",
+    "allow-get-recent-chats"
   ]
 }

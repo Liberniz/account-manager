@@ -4,7 +4,7 @@ mod session_manager;
 mod storage;
 mod updater;
 
-use session_manager::{GlobalSearchResult, ManagerSnapshot, SessionManager, APP_TITLE};
+use session_manager::{GlobalChatHit, GlobalSearchResult, ManagerSnapshot, SessionManager, APP_TITLE};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 use updater::{InstallUpdateOutcome, InstallUpdateRequest, UpdateCheckResult};
@@ -233,6 +233,14 @@ async fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn get_recent_chats(
+  mgr: State<'_, Arc<SessionManager>>,
+  limit: usize,
+) -> Result<Vec<GlobalChatHit>, String> {
+  Ok(mgr.get_recent_chats(limit).await)
+}
+
+#[tauri::command]
 async fn search_global_chats(
   app: AppHandle,
   mgr: State<'_, Arc<SessionManager>>,
@@ -438,6 +446,7 @@ pub fn run() {
       check_for_updates,
       download_and_install_update,
       open_external_url,
+      get_recent_chats,
       search_global_chats,
       open_global_chat,
       get_notification_status,

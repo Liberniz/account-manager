@@ -715,6 +715,7 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
     // 会话状态启发式检测（仅 muse.ai）：waiting=页面上有审批请求，
     // working=正在生成（有停止按钮），active=有可用的会话输入框，idle=其他。
     const detectSessionState = () => {
+      window.__maamPendingDetail = '';
       try {
         if (!(host === 'muse.ai' || host.endsWith('.muse.ai'))) return 'unknown';
         const vis = (el) => {
@@ -740,8 +741,17 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
           return false;
         };
         let isWaiting = false;
-        for (const a of allowBtns) { for (const d of denyBtns) { if (shareContainer(a, d)) { isWaiting = true; break; } } if (isWaiting) break; }
-        if (isWaiting) return 'waiting';
+        let cardBtn = null;
+        for (const a of allowBtns) { for (const d of denyBtns) { if (shareContainer(a, d)) { isWaiting = true; cardBtn = a; break; } } if (isWaiting) break; }
+        if (isWaiting) {
+          try {
+            let n = cardBtn;
+            for (let i = 0; i < 4 && n && n.parentElement; i++) n = n.parentElement;
+            const t = ((n && n.innerText) || '').replace(/\s+/g, ' ').trim();
+            window.__maamPendingDetail = t.slice(0, 160);
+          } catch (_) {}
+          return 'waiting';
+        }
         // 工作中检测（v0.4.0 收紧）：旧版拿 /停止|stop/ 对按钮做子串匹配，
         // 又拿「正在思考|正在生成」扫整页正文——聊天历史里出现过这些词
         // （尤其生成形象的会话）状态就永久粘在「工作中」。改为：停止按钮
@@ -1038,6 +1048,7 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
       quotaPct: quota.pct,
       quotaDetail: quota.detail || null,
       sessionState: detectSessionState(),
+      pendingDetail: window.__maamPendingDetail || '',
       pendingHotkey
     });
   } catch (_) {
@@ -1105,7 +1116,7 @@ const CHAT_SEARCH_POLL_JS: &str = r#"(() => {
   return typeof v === 'string' ? v : 'pending';
 })()"#;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChatSearchItem {
   id: String,
   #[serde(default)]
@@ -1140,7 +1151,22 @@ pub struct GlobalChatHit {
 pub struct GlobalSearchResult {
   pub results: Vec<GlobalChatHit>,
   pub searched_count: usize,
+  pub cached_count: usize,
   pub failed_aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChatIndexEntry {
+  items: Vec<ChatSearchItem>,
+  updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChatIndexRecord {
+  provider: String,
+  uuid: String,
+  updated_at_ms: u64,
+  items: Vec<ChatSearchItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1214,6 +1240,9 @@ struct InnerState {
   modal_active: bool,
   quota_miss: HashMap<AccountKey, u32>,
   session_states: HashMap<AccountKey, String>,
+  pending_details: HashMap<AccountKey, String>,
+  done_notes: Vec<(String, u64)>,
+  chat_index: HashMap<AccountKey, ChatIndexEntry>,
   #[cfg(desktop)]
   transient_probes: HashSet<(AccountKey, u64)>,
   #[cfg(desktop)]
@@ -1249,6 +1278,8 @@ impl SessionManager {
       .filter(|pid| get_provider(*pid).info.enabled)
       .unwrap_or(ProviderId::Muse);
 
+    let chat_index = Self::load_chat_index_file(&app_data_dir);
+
     Self {
       current_seq: Arc::new(AtomicU64::new(1)),
       active_view_id: Arc::new(AtomicU64::new(0)),
@@ -1274,6 +1305,9 @@ impl SessionManager {
         modal_active: false,
         quota_miss: HashMap::new(),
         session_states: HashMap::new(),
+        pending_details: HashMap::new(),
+        done_notes: Vec::new(),
+        chat_index,
         #[cfg(desktop)]
         transient_probes: HashSet::new(),
         #[cfg(desktop)]
@@ -1333,6 +1367,11 @@ impl SessionManager {
         .get(&k)
         .cloned()
         .unwrap_or_else(|| "unknown".to_string());
+      acc.pending_detail = locked
+        .pending_details
+        .get(&k)
+        .cloned()
+        .unwrap_or_default();
       #[cfg(desktop)]
       if locked.prewarm_failed.contains(&k) {
         acc.view_error = true;
@@ -1504,6 +1543,17 @@ impl SessionManager {
       loop {
         interval.tick().await;
         mgr_periodic.trigger_silent_sync(&app_periodic, false).await;
+      }
+    });
+
+    let mgr_done = Arc::clone(self);
+    let app_done = app.clone();
+    tauri::async_runtime::spawn(async move {
+      let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60));
+      interval.tick().await;
+      loop {
+        interval.tick().await;
+        mgr_done.flush_done_notes(&app_done).await;
       }
     });
 
@@ -1906,6 +1956,7 @@ impl SessionManager {
         quota_stale: false,
         note: String::new(),
         session_state: "unknown".to_string(),
+        pending_detail: String::new(),
         view_error: false,
         sort_order: next_sort_order,
         teleagent_token: String::new(),
@@ -2046,12 +2097,18 @@ impl SessionManager {
   /// 会话状态跃迁处理：探针回报 working / waiting / active / idle，
   /// 本方法结合上一状态推导 done（工作中→静止）与 idle（done→静止），
   /// 进入「待审批」或「已完成」时发系统通知（当前前台账号不打扰）。
-  async fn apply_session_state(&self, app: &AppHandle, key: AccountKey, raw: &str) {
+  async fn apply_session_state(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    key: AccountKey,
+    raw: &str,
+    pending_detail: &str,
+  ) {
     let raw = match raw {
       "working" | "waiting" | "active" | "idle" => raw,
       _ => return,
     };
-    let (snap, notice) = {
+    let snap_notice = {
       let mut locked = self.inner.lock().await;
       let prev = locked
         .session_states
@@ -2063,7 +2120,20 @@ impl SessionManager {
         (_, "active") => "idle",
         (_, s) => s,
       };
+      if next == "waiting" && !pending_detail.trim().is_empty() {
+        locked
+          .pending_details
+          .insert(key.clone(), pending_detail.trim().to_string());
+      }
+      if next != "waiting" {
+        locked.pending_details.remove(&key);
+      }
       if next == prev {
+        if next == "waiting" {
+          let snap2 = Self::snapshot_from_locked(&locked);
+          drop(locked);
+          self.emit_snapshot(app, &snap2);
+        }
         return;
       }
       locked.session_states.insert(key.clone(), next.to_string());
@@ -2079,26 +2149,97 @@ impl SessionManager {
         .find(|a| a.provider_id == key.provider_id && a.uuid == key.uuid)
         .map(|a| a.alias.clone())
         .unwrap_or_default();
+      let detail = locked
+        .pending_details
+        .get(&key)
+        .cloned()
+        .unwrap_or_default();
       let notice = if is_foreground {
         None
       } else if next == "waiting" {
-        Some((
-          format!("「{alias}」需要你审批"),
-          "会话正在等待批准，可从托盘菜单或账号列表快速切过去处理。".to_string(),
-        ))
-      } else if next == "done" {
-        Some((
-          format!("「{alias}」的会话已完成"),
-          "可以切过去查看结果了。".to_string(),
-        ))
+        let body = if detail.is_empty() {
+          "会话正在等待批准，可从托盘菜单或账号列表快速切过去处理。".to_string()
+        } else {
+          format!("待审批：{detail}")
+        };
+        Some((format!("「{alias}」需要你审批"), body))
       } else {
         None
       };
-      (Self::snapshot_from_locked(&locked), notice)
+      let done_alias = if !is_foreground && next == "done" {
+        Some(alias.clone())
+      } else {
+        None
+      };
+      (Self::snapshot_from_locked(&locked), notice, done_alias)
     };
+    let (snap, notice, done_alias) = (snap_notice.0, snap_notice.1, snap_notice.2);
     self.emit_snapshot(app, &snap);
     if let Some((title, body)) = notice {
       Self::notify(app, &title, &body, Some(format!("account-{}", key.uuid)));
+    }
+    if let Some(alias) = done_alias {
+      self.queue_done_note(app, alias).await;
+    }
+  }
+
+  /// 通知分级：完成类不逐条打扰，先攒着——满 3 条或最久一条等满 45 分钟
+  /// 合并成一条摘要；夜间 23:00–08:00 安静时段只攒不发，早上自动补发。
+  /// 审批/过期/额度类仍走即时通知，不进这里。
+  async fn queue_done_note(self: &Arc<Self>, app: &AppHandle, alias: String) {
+    {
+      let mut locked = self.inner.lock().await;
+      if !locked.done_notes.iter().any(|(a, _)| a == &alias) {
+        locked.done_notes.push((alias, now_ms()));
+      }
+    }
+    self.flush_done_notes(app).await;
+  }
+
+  fn is_quiet_hours() -> bool {
+    use chrono::Timelike;
+    let h = chrono::Local::now().hour();
+    h >= 23 || h < 8
+  }
+
+  async fn flush_done_notes(self: &Arc<Self>, app: &AppHandle) {
+    let notes = {
+      let mut locked = self.inner.lock().await;
+      if locked.done_notes.is_empty() || Self::is_quiet_hours() {
+        return;
+      }
+      let oldest = locked
+        .done_notes
+        .iter()
+        .map(|(_, ts)| *ts)
+        .min()
+        .unwrap_or_else(now_ms);
+      let due = locked.done_notes.len() >= 3
+        || now_ms().saturating_sub(oldest) >= 45 * 60 * 1000;
+      if !due {
+        return;
+      }
+      std::mem::take(&mut locked.done_notes)
+    };
+    if notes.len() == 1 {
+      Self::notify(
+        app,
+        &format!("「{}」的会话已完成", notes[0].0),
+        "可以切过去查看结果了。",
+        None,
+      );
+    } else {
+      let names = notes
+        .iter()
+        .map(|(a, _)| a.as_str())
+        .collect::<Vec<_>>()
+        .join("、");
+      Self::notify(
+        app,
+        "多个会话已完成",
+        &format!("{names} 的会话已完成，可以切过去查看结果了。"),
+        None,
+      );
     }
   }
 
@@ -2212,6 +2353,7 @@ impl SessionManager {
         quota_stale: false,
         note: String::new(),
         session_state: "unknown".to_string(),
+        pending_detail: String::new(),
         view_error: false,
         sort_order: next_sort_order,
         teleagent_token: token,
@@ -2705,6 +2847,7 @@ impl SessionManager {
         quota_stale: false,
         note: String::new(),
         session_state: "unknown".to_string(),
+        pending_detail: String::new(),
         view_error: false,
         sort_order: next_sort_order,
         teleagent_token: String::new(),
@@ -3189,7 +3332,7 @@ impl SessionManager {
             tokio::time::sleep(std::time::Duration::from_millis(850)).await;
             if let Some(probe) = Self::eval_identity_probe(&wv).await {
               mgr
-                .apply_session_state(&app_handle, key.clone(), &probe.session_state)
+                .apply_session_state(&app_handle, key.clone(), &probe.session_state, &probe.pending_detail)
                 .await;
               if probe.is_auth {
                 let resolved_identity = if !probe.email.is_empty() {
@@ -3348,7 +3491,7 @@ impl SessionManager {
 
       if let Some(probe) = Self::eval_identity_probe(&created_wv).await {
         self
-          .apply_session_state(app, key.clone(), &probe.session_state)
+          .apply_session_state(app, key.clone(), &probe.session_state, &probe.pending_detail)
           .await;
         if probe.is_auth {
           let resolved_identity = if !probe.email.is_empty() {
@@ -3374,6 +3517,17 @@ impl SessionManager {
           self
             .apply_logged_out_state(app, key.clone(), view_instance_id)
             .await;
+        }
+      }
+      if account.provider_id == ProviderId::Muse {
+        if let Some(payload) = Self::eval_chat_search(&created_wv).await {
+          if payload.ok {
+            let key2 = AccountKey {
+              provider_id: account.provider_id,
+              uuid: account.uuid.clone(),
+            };
+            self.stash_chat_index(&key2, payload.items).await;
+          }
         }
       }
       Ok::<(), String>(())
@@ -4504,7 +4658,7 @@ impl SessionManager {
         };
 
         mgr
-          .apply_session_state(&app, key.clone(), &probe.session_state)
+          .apply_session_state(&app, key.clone(), &probe.session_state, &probe.pending_detail)
           .await;
 
         if let Some(idx) = probe.pending_hotkey {
@@ -4641,6 +4795,13 @@ impl SessionManager {
       .trim()
       .to_string();
 
+    let pending_detail = val
+      .get("pendingDetail")
+      .and_then(|v| v.as_str())
+      .unwrap_or("")
+      .trim()
+      .to_string();
+
     Some(DesktopProbeResult {
       is_auth,
       logged_out,
@@ -4652,6 +4813,7 @@ impl SessionManager {
       quota_detail,
       pending_hotkey,
       session_state,
+      pending_detail,
     })
   }
 
@@ -4773,6 +4935,102 @@ impl SessionManager {
     result
   }
 
+  fn chat_index_path(app_data_dir: &std::path::Path) -> PathBuf {
+    app_data_dir.join("chat-index.json")
+  }
+
+  fn load_chat_index_file(
+    app_data_dir: &std::path::Path,
+  ) -> HashMap<AccountKey, ChatIndexEntry> {
+    let mut map = HashMap::new();
+    if let Ok(text) = std::fs::read_to_string(Self::chat_index_path(app_data_dir)) {
+      if let Ok(records) = serde_json::from_str::<Vec<ChatIndexRecord>>(&text) {
+        for r in records {
+          if let Some(pid) = ProviderId::parse(&r.provider) {
+            map.insert(
+              AccountKey {
+                provider_id: pid,
+                uuid: r.uuid,
+              },
+              ChatIndexEntry {
+                items: r.items,
+                updated_at_ms: r.updated_at_ms,
+              },
+            );
+          }
+        }
+      }
+    }
+    map
+  }
+
+  fn save_chat_index_locked(locked: &InnerState) {
+    let records: Vec<ChatIndexRecord> = locked
+      .chat_index
+      .iter()
+      .map(|(k, e)| ChatIndexRecord {
+        provider: k.provider_id.as_str().to_string(),
+        uuid: k.uuid.clone(),
+        updated_at_ms: e.updated_at_ms,
+        items: e.items.clone(),
+      })
+      .collect();
+    if let Ok(text) = serde_json::to_string(&records) {
+      let path = Self::chat_index_path(&locked.app_data_dir);
+      let tmp = path.with_extension("json.tmp");
+      if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+      }
+    }
+  }
+
+  async fn stash_chat_index(&self, key: &AccountKey, items: Vec<ChatSearchItem>) {
+    let mut locked = self.inner.lock().await;
+    locked.chat_index.insert(
+      key.clone(),
+      ChatIndexEntry {
+        items,
+        updated_at_ms: now_ms(),
+      },
+    );
+    Self::save_chat_index_locked(&locked);
+  }
+
+  /// 全局最近会话：只读本地索引（不现拉），按更新时间倒序。
+  pub async fn get_recent_chats(&self, limit: usize) -> Vec<GlobalChatHit> {
+    let locked = self.inner.lock().await;
+    let mut hits: Vec<GlobalChatHit> = Vec::new();
+    for (key, entry) in locked.chat_index.iter() {
+      let alias = locked
+        .store
+        .accounts
+        .iter()
+        .find(|a| a.provider_id == key.provider_id && a.uuid == key.uuid)
+        .map(|a| a.alias.clone())
+        .unwrap_or_default();
+      if alias.is_empty() {
+        continue;
+      }
+      for item in &entry.items {
+        hits.push(GlobalChatHit {
+          uuid: key.uuid.clone(),
+          alias: alias.clone(),
+          session_id: item.id.clone(),
+          title: if item.title.trim().is_empty() {
+            "（无标题会话）".to_string()
+          } else {
+            item.title.clone()
+          },
+          preview: item.preview.clone(),
+          updated_at: item.updated.clone(),
+        });
+      }
+    }
+    hits.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    hits.truncate(limit.clamp(1, 100));
+    hits
+  }
+
   /// 全局聊天搜索：逐个 Muse 账号拉会话列表，按标题/预览匹配关键词。
   /// 活视图账号先搜（快），冷账号逐个临时加载（慢），结果按更新时间倒序。
   pub async fn search_global_chats(
@@ -4799,10 +5057,11 @@ impl SessionManager {
     query: &str,
   ) -> Result<GlobalSearchResult, String> {
     let q = query.trim().to_lowercase();
-    let (mut warm_accounts, mut cold_accounts) = {
+    // 有索引的账号走本地缓存（瞬间出结果），没索引的才现拉并顺手入索引。
+    let (cached, live) = {
       let locked = self.inner.lock().await;
-      let mut warm = Vec::new();
-      let mut cold = Vec::new();
+      let mut cached: Vec<(AccountRecord, Vec<ChatSearchItem>)> = Vec::new();
+      let mut live: Vec<AccountRecord> = Vec::new();
       for a in locked.store.accounts.iter() {
         if a.provider_id != ProviderId::Muse {
           continue;
@@ -4814,43 +5073,60 @@ impl SessionManager {
         if locked.store.pending_cleanup.contains(&k) {
           continue;
         }
-        if locked.warm_pool.contains_key(&k) {
-          warm.push(a.clone());
-        } else {
-          cold.push(a.clone());
+        match locked.chat_index.get(&k) {
+          Some(entry) => cached.push((a.clone(), entry.items.clone())),
+          None => live.push(a.clone()),
         }
       }
-      (warm, cold)
+      (cached, live)
     };
-    let mut ordered = Vec::new();
-    ordered.append(&mut warm_accounts);
-    ordered.append(&mut cold_accounts);
+
+    fn push_matches(
+      results: &mut Vec<GlobalChatHit>,
+      account: &AccountRecord,
+      items: Vec<ChatSearchItem>,
+      q: &str,
+    ) {
+      for item in items {
+        let title_l = item.title.to_lowercase();
+        let preview_l = item.preview.to_lowercase();
+        if q.is_empty() || title_l.contains(q) || preview_l.contains(q) {
+          results.push(GlobalChatHit {
+            uuid: account.uuid.clone(),
+            alias: account.alias.clone(),
+            session_id: item.id,
+            title: if item.title.trim().is_empty() {
+              "（无标题会话）".to_string()
+            } else {
+              item.title
+            },
+            preview: item.preview,
+            updated_at: item.updated,
+          });
+        }
+      }
+    }
 
     let mut results: Vec<GlobalChatHit> = Vec::new();
     let mut searched_count = 0usize;
+    let mut cached_count = 0usize;
     let mut failed_aliases: Vec<String> = Vec::new();
-    for account in &ordered {
+
+    for (account, items) in &cached {
+      searched_count += 1;
+      cached_count += 1;
+      push_matches(&mut results, account, items.clone(), &q);
+    }
+    for account in &live {
       match self.search_one_account(app, account).await {
         Some(payload) if payload.ok => {
           searched_count += 1;
-          for item in payload.items {
-            let title_l = item.title.to_lowercase();
-            let preview_l = item.preview.to_lowercase();
-            if q.is_empty() || title_l.contains(&q) || preview_l.contains(&q) {
-              results.push(GlobalChatHit {
-                uuid: account.uuid.clone(),
-                alias: account.alias.clone(),
-                session_id: item.id,
-                title: if item.title.trim().is_empty() {
-                  "（无标题会话）".to_string()
-                } else {
-                  item.title
-                },
-                preview: item.preview,
-                updated_at: item.updated,
-              });
-            }
-          }
+          let key = AccountKey {
+            provider_id: account.provider_id,
+            uuid: account.uuid.clone(),
+          };
+          self.stash_chat_index(&key, payload.items.clone()).await;
+          push_matches(&mut results, account, payload.items, &q);
         }
         _ => failed_aliases.push(account.alias.clone()),
       }
@@ -4860,6 +5136,7 @@ impl SessionManager {
     Ok(GlobalSearchResult {
       results,
       searched_count,
+      cached_count,
       failed_aliases,
     })
   }
@@ -5403,4 +5680,5 @@ struct DesktopProbeResult {
   quota_detail: Option<QuotaDetail>,
   pending_hotkey: Option<u8>,
   session_state: String,
+  pending_detail: String,
 }

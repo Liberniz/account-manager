@@ -1,6 +1,6 @@
 [package]
 name = "multi-agent-account-manager"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.85"
 
@@ -12,6 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "=2.7.5", features = [] }
 
 [dependencies]
+chrono = "0.4"
 tauri = { version = "=2.12.6", features = ["unstable", "macos-proxy", "tray-icon"] }
 objc2-user-notifications = "0.3"
 serde = { version = "1", features = ["derive"] }

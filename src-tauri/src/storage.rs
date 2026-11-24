@@ -77,6 +77,8 @@ pub struct AccountRecord {
   /// unknown / idle / working / waiting / done。
   #[serde(default)]
   pub session_state: String,
+  #[serde(default)]
+  pub pending_detail: String,
   /// 视图预热失败标记（运行时注入快照，落盘副本恒为 false）。
   #[serde(default)]
   pub view_error: bool,
@@ -390,6 +392,7 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
           .unwrap_or("")
           .to_string(),
         session_state: "unknown".to_string(),
+        pending_detail: String::new(),
         view_error: false,
         sort_order: item_obj
           .get("sortOrder")

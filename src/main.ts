@@ -11,6 +11,7 @@ import type {
   QuotaDetail,
   UpdateCheckResult,
   UpdateProgressEvent,
+  GlobalChatHit,
   GlobalSearchResult,
 } from "./types";
 
@@ -1149,6 +1150,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
     }
     ${noticeHtml}
     ${conflictsHtml}
+    ${renderPendingQueue(state)}
     ${provider.id === "muse" ? renderChatSearch() : providerAccounts.length >= 5 ? `<div class="account-search-row"><input id="account-search-input" class="account-search" type="text" placeholder="搜索账号（别名 / 备注）" value="${escapeHtml(accountSearchQuery)}" /></div>` : ""}
     ${overviewHtml}
     <div class="account-list">${listBody}</div>
@@ -1229,11 +1231,34 @@ function renderChatSearch(): string {
   } else if (chatSearchResult && q !== "") {
     const r = chatSearchResult;
     const status = `已搜 ${r.searchedCount} 个账号 · ${r.results.length} 条结果${
-      r.failedAliases.length ? ` · 未搜到：${r.failedAliases.join("、")}` : ""
-    }`;
-    const rows = r.results
-      .map(
-        (h) => `
+      r.cachedCount ? ` · ${r.cachedCount} 个账号走本地索引` : ""
+    }${r.failedAliases.length ? ` · 未搜到：${r.failedAliases.join("、")}` : ""}`;
+    const rows = r.results.map(chatHitRow).join("");
+    panel = `<div class="chat-search-panel"><div class="chat-search-status">${escapeHtml(status)}</div>${
+      rows || `<div class="chat-search-status">没有匹配的聊天记录</div>`
+    }</div>`;
+  } else if (q === "" && recentChats.length > 0) {
+    panel = `<div class="chat-search-panel"><div class="chat-search-status">最近会话（全部账号）</div>${recentChats.map(chatHitRow).join("")}</div>`;
+  }
+  return `<div class="account-search-row"><input id="chat-search-input" class="account-search" type="text" placeholder="搜索全部账号的聊天记录" value="${escapeHtml(chatSearchQuery)}" />${panel}</div>`;
+}
+
+let recentChats: GlobalChatHit[] = [];
+let recentChatsAt = 0;
+
+async function refreshRecentChats(force = false): Promise<boolean> {
+  if (!force && Date.now() - recentChatsAt < 60_000) return false;
+  try {
+    recentChats = await invoke<GlobalChatHit[]>("get_recent_chats", { limit: 12 });
+    recentChatsAt = Date.now();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function chatHitRow(h: GlobalChatHit): string {
+  return `
       <button type="button" class="chat-hit" data-chat-uuid="${escapeHtml(h.uuid)}" data-chat-session="${escapeHtml(h.sessionId)}">
         <span class="chat-hit-alias">${escapeHtml(h.alias)}</span>
         <span class="chat-hit-main">
@@ -1241,14 +1266,199 @@ function renderChatSearch(): string {
           ${h.preview ? `<span class="chat-hit-preview">${escapeHtml(h.preview)}</span>` : ""}
         </span>
         ${h.updatedAt ? `<span class="chat-hit-time">${escapeHtml(formatChatTime(h.updatedAt))}</span>` : ""}
-      </button>`
-      )
-      .join("");
-    panel = `<div class="chat-search-panel"><div class="chat-search-status">${escapeHtml(status)}</div>${
-      rows || `<div class="chat-search-status">没有匹配的聊天记录</div>`
-    }</div>`;
+      </button>`;
+}
+
+type PendingKind = "waiting" | "done" | "logged_out";
+
+function pendingItemsOf(
+  st: ManagerSnapshot
+): { acc: AccountRecord; kind: PendingKind; label: string }[] {
+  const items: { acc: AccountRecord; kind: PendingKind; label: string }[] = [];
+  for (const acc of st.accounts) {
+    if (acc.sessionState === "waiting" && acc.authState !== "logged_out")
+      items.push({ acc, kind: "waiting", label: "等审批" });
+    else if (acc.sessionState === "done")
+      items.push({ acc, kind: "done", label: "已完成" });
+    else if (acc.authState === "logged_out")
+      items.push({ acc, kind: "logged_out", label: "登录过期" });
   }
-  return `<div class="account-search-row"><input id="chat-search-input" class="account-search" type="text" placeholder="搜索全部账号的聊天记录" value="${escapeHtml(chatSearchQuery)}" />${panel}</div>`;
+  const order: Record<PendingKind, number> = { waiting: 0, done: 1, logged_out: 2 };
+  return items.sort((a, b) => order[a.kind] - order[b.kind]);
+}
+
+function providerShortName(st: ManagerSnapshot, id: string): string {
+  return st.providers.find((p) => p.id === id)?.shortName ?? id;
+}
+
+function renderPendingQueue(st: ManagerSnapshot): string {
+  const items = pendingItemsOf(st);
+  if (!items.length) return "";
+  const rows = items
+    .map(
+      ({ acc, kind, label }) => `
+      <button type="button" class="queue-row queue-${kind}" data-queue-provider="${escapeHtml(acc.providerId)}" data-queue-uuid="${escapeHtml(acc.uuid)}">
+        <span class="queue-badge">${label}</span>
+        <span class="queue-alias">${escapeHtml(acc.alias)}</span>
+        <span class="queue-provider">${escapeHtml(providerShortName(st, acc.providerId))}</span>
+        ${kind === "waiting" && acc.pendingDetail ? `<span class="queue-detail">${escapeHtml(acc.pendingDetail)}</span>` : ""}
+      </button>`
+    )
+    .join("");
+  return `<div class="pending-queue"><div class="pending-queue-title">待处理（${items.length}）</div>${rows}</div>`;
+}
+
+// ---------- Cmd+K 命令面板 ----------
+interface PaletteItem {
+  section: string;
+  label: string;
+  sub: string;
+  run: () => Promise<void> | void;
+}
+
+const palette = { open: false, query: "", sel: 0 };
+let paletteItems: PaletteItem[] = [];
+let paletteRecent: GlobalChatHit[] = [];
+
+function buildPaletteItems(st: ManagerSnapshot): PaletteItem[] {
+  const q = palette.query.trim().toLowerCase();
+  const match = (t: string) => !q || t.toLowerCase().includes(q);
+  const items: PaletteItem[] = [];
+  for (const { acc, kind, label } of pendingItemsOf(st)) {
+    if (!match(`${acc.alias} ${label} ${acc.pendingDetail}`)) continue;
+    items.push({
+      section: "待处理",
+      label: `${label} · ${acc.alias}`,
+      sub: kind === "waiting" && acc.pendingDetail ? acc.pendingDetail : providerShortName(st, acc.providerId),
+      run: async () => {
+        closePalette();
+        await callCommand("switch_account", { providerId: acc.providerId, uuid: acc.uuid });
+      },
+    });
+  }
+  const sorted = [...st.accounts].sort(
+    (a, b) =>
+      (a.providerId === st.selectedProviderId ? 0 : 1) -
+      (b.providerId === st.selectedProviderId ? 0 : 1)
+  );
+  for (const acc of sorted) {
+    if (!match(`${acc.alias} ${acc.note}`)) continue;
+    items.push({
+      section: "账号",
+      label: acc.alias,
+      sub: `${providerShortName(st, acc.providerId)}${isSameKey(st.activeAccount, acc) ? " · 当前" : ""}`,
+      run: async () => {
+        closePalette();
+        await callCommand("switch_account", { providerId: acc.providerId, uuid: acc.uuid });
+      },
+    });
+  }
+  for (const h of paletteRecent) {
+    if (!match(`${h.title} ${h.alias} ${h.preview}`)) continue;
+    items.push({
+      section: "会话",
+      label: h.title,
+      sub: `${h.alias}${h.updatedAt ? ` · ${formatChatTime(h.updatedAt)}` : ""}`,
+      run: async () => {
+        closePalette();
+        await callCommand("open_global_chat", { providerId: "muse", uuid: h.uuid, sessionId: h.sessionId });
+      },
+    });
+  }
+  const actions: PaletteItem[] = [
+    {
+      section: "操作",
+      label: "刷新全部额度",
+      sub: "",
+      run: async () => {
+        closePalette();
+        await callCommand("refresh_all_quotas");
+      },
+    },
+    {
+      section: "操作",
+      label: "检查更新",
+      sub: "",
+      run: () => {
+        closePalette();
+        document.querySelector<HTMLElement>("#check-update-btn")?.click();
+      },
+    },
+    {
+      section: "操作",
+      label: "发送测试通知",
+      sub: "",
+      run: async () => {
+        closePalette();
+        try {
+          await invoke<string>("send_test_notification");
+        } catch {
+          /* 通知面板会显示状态 */
+        }
+      },
+    },
+  ];
+  for (const a of actions) if (match(a.label)) items.push(a);
+  return items;
+}
+
+function paletteListHtml(st: ManagerSnapshot): string {
+  paletteItems = buildPaletteItems(st);
+  if (palette.sel >= paletteItems.length)
+    palette.sel = Math.max(0, paletteItems.length - 1);
+  if (!paletteItems.length) return `<div class="palette-empty">没有匹配项</div>`;
+  let lastSection = "";
+  return paletteItems
+    .map((it, i) => {
+      const head =
+        it.section !== lastSection
+          ? `<div class="palette-section">${it.section}</div>`
+          : "";
+      lastSection = it.section;
+      return `${head}<button type="button" class="palette-item ${i === palette.sel ? "selected" : ""}" data-palette-idx="${i}">
+        <span class="palette-item-label">${escapeHtml(it.label)}</span>
+        ${it.sub ? `<span class="palette-item-sub">${escapeHtml(it.sub)}</span>` : ""}
+      </button>`;
+    })
+    .join("");
+}
+
+function renderPalette(st: ManagerSnapshot): string {
+  return `<div class="palette-overlay" id="palette-overlay">
+    <div class="palette-panel">
+      <input id="palette-input" class="palette-input" type="text" placeholder="搜账号、会话，或输入操作…" value="${escapeHtml(palette.query)}" />
+      <div class="palette-list" id="palette-list">${paletteListHtml(st)}</div>
+      <div class="palette-hint">↑↓ 选择 · Enter 执行 · Esc 关闭</div>
+    </div>
+  </div>`;
+}
+
+function refreshPaletteListDom(): void {
+  const el = document.getElementById("palette-list");
+  if (el && snapshot) {
+    el.innerHTML = paletteListHtml(snapshot);
+    el.querySelector(".palette-item.selected")?.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function openPalette(): void {
+  palette.open = true;
+  palette.query = "";
+  palette.sel = 0;
+  render();
+  void (async () => {
+    try {
+      paletteRecent = await invoke<GlobalChatHit[]>("get_recent_chats", { limit: 50 });
+      if (palette.open) refreshPaletteListDom();
+    } catch {
+      /* 索引为空时会话区为空 */
+    }
+  })();
+}
+
+function closePalette(): void {
+  palette.open = false;
+  render();
 }
 
 async function runChatSearch(): Promise<void> {
@@ -1271,6 +1481,7 @@ async function runChatSearch(): Promise<void> {
   } finally {
     chatSearchLoading = false;
     render();
+    void refreshRecentChats(true);
   }
 }
 
@@ -1289,10 +1500,17 @@ function render(): void {
         </section>
         ${renderRightStage(snapshot, provider)}
       </div>
+      ${palette.open ? renderPalette(snapshot) : ""}
     `;
-  
 
   bindEvents(snapshot, provider);
+  if (palette.open) {
+    const pi = document.querySelector<HTMLInputElement>("#palette-input");
+    if (pi && document.activeElement !== pi) {
+      pi.focus();
+      pi.setSelectionRange(pi.value.length, pi.value.length);
+    }
+  }
 }
 
 function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
@@ -1427,7 +1645,65 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     });
   });
 
+  document.querySelectorAll<HTMLElement>("[data-queue-uuid]").forEach((el) => {
+    el.addEventListener("click", async () => {
+      const uuid = el.dataset.queueUuid;
+      const providerId = el.dataset.queueProvider;
+      if (uuid && providerId) {
+        await callCommand("switch_account", { providerId, uuid });
+      }
+    });
+  });
+
+  const paletteInput = document.querySelector<HTMLInputElement>("#palette-input");
+  paletteInput?.addEventListener("input", () => {
+    palette.query = paletteInput.value;
+    palette.sel = 0;
+    refreshPaletteListDom();
+  });
+  paletteInput?.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const d = e.key === "ArrowDown" ? 1 : -1;
+      palette.sel = Math.min(
+        Math.max(0, palette.sel + d),
+        Math.max(0, paletteItems.length - 1)
+      );
+      refreshPaletteListDom();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const it = paletteItems[palette.sel];
+      if (it) void it.run();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closePalette();
+    }
+  });
+  document.querySelector("#palette-list")?.addEventListener("click", (ev) => {
+    const btn = (ev.target as HTMLElement).closest<HTMLElement>("[data-palette-idx]");
+    if (!btn) return;
+    const it = paletteItems[Number(btn.dataset.paletteIdx)];
+    if (it) void it.run();
+  });
+  document.querySelector("#palette-overlay")?.addEventListener("click", (ev) => {
+    if (ev.target === ev.currentTarget) closePalette();
+  });
+
   const chatInput = document.querySelector<HTMLInputElement>("#chat-search-input");
+  chatInput?.addEventListener("focus", () => {
+    void (async () => {
+      const changed = await refreshRecentChats();
+      if (
+        changed &&
+        chatSearchQuery.trim() === "" &&
+        !chatSearchResult &&
+        !chatSearchLoading
+      ) {
+        render();
+        document.querySelector<HTMLInputElement>("#chat-search-input")?.focus();
+      }
+    })();
+  });
   chatInput?.addEventListener("input", () => {
     chatSearchQuery = chatInput.value;
     window.clearTimeout(chatSearchTimer);
@@ -1850,6 +2126,17 @@ async function bootstrap(): Promise<void> {
   });
 
   window.addEventListener("keydown", async (ev) => {
+    if (
+      (ev.metaKey || ev.ctrlKey) &&
+      !ev.shiftKey &&
+      !ev.altKey &&
+      ev.key.toLowerCase() === "k"
+    ) {
+      ev.preventDefault();
+      if (palette.open) closePalette();
+      else openPalette();
+      return;
+    }
     if (modal.kind !== "none") {
       if (
         ev.key === "Escape" &&

@@ -44,6 +44,7 @@ export interface AccountRecord {
   quotaStale: boolean;
   note: string;
   sessionState: string;
+  pendingDetail: string;
   viewError: boolean;
   sortOrder: number;
   tokenExpiresAtMs: number | null;
@@ -96,6 +97,7 @@ export interface GlobalChatHit {
 export interface GlobalSearchResult {
   results: GlobalChatHit[];
   searchedCount: number;
+  cachedCount: number;
   failedAliases: string[];
 }
 
