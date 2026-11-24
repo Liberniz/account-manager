@@ -11,6 +11,7 @@ import type {
   QuotaDetail,
   UpdateCheckResult,
   UpdateProgressEvent,
+  GlobalSearchResult,
 } from "./types";
 
 type ModalMode =
@@ -54,6 +55,11 @@ let snapshot: ManagerSnapshot | null = null;
 let modal: ModalMode = { kind: "none" };
 let optimisticSwitching: AccountKey | null = null;
 let accountSearchQuery = "";
+let chatSearchQuery = "";
+let chatSearchLoading = false;
+let chatSearchResult: GlobalSearchResult | null = null;
+let chatSearchError = "";
+let chatSearchTimer: number | undefined;
 let dragInProgress = false;
 let suppressNextClick = false;
 let busy = false;
@@ -1143,7 +1149,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
     }
     ${noticeHtml}
     ${conflictsHtml}
-    ${providerAccounts.length >= 5 ? `<div class="account-search-row"><input id="account-search-input" class="account-search" type="text" placeholder="搜索账号（别名 / 备注）" value="${escapeHtml(accountSearchQuery)}" /></div>` : ""}
+    ${provider.id === "muse" ? renderChatSearch() : providerAccounts.length >= 5 ? `<div class="account-search-row"><input id="account-search-input" class="account-search" type="text" placeholder="搜索账号（别名 / 备注）" value="${escapeHtml(accountSearchQuery)}" /></div>` : ""}
     ${overviewHtml}
     <div class="account-list">${listBody}</div>
     <div class="column-footer">
@@ -1205,6 +1211,67 @@ function renderRightStage(state: ManagerSnapshot, provider: ProviderInfo): strin
       </div>
     </main>
   `;
+}
+
+function formatChatTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
+function renderChatSearch(): string {
+  const q = chatSearchQuery.trim();
+  let panel = "";
+  if (chatSearchLoading) {
+    panel = `<div class="chat-search-panel"><div class="chat-search-status">正在逐个账号搜索聊天记录，冷账号需要临时加载页面，请稍候…</div></div>`;
+  } else if (chatSearchError) {
+    panel = `<div class="chat-search-panel"><div class="chat-search-status">${escapeHtml(chatSearchError)}</div></div>`;
+  } else if (chatSearchResult && q !== "") {
+    const r = chatSearchResult;
+    const status = `已搜 ${r.searchedCount} 个账号 · ${r.results.length} 条结果${
+      r.failedAliases.length ? ` · 未搜到：${r.failedAliases.join("、")}` : ""
+    }`;
+    const rows = r.results
+      .map(
+        (h) => `
+      <button type="button" class="chat-hit" data-chat-uuid="${escapeHtml(h.uuid)}" data-chat-session="${escapeHtml(h.sessionId)}">
+        <span class="chat-hit-alias">${escapeHtml(h.alias)}</span>
+        <span class="chat-hit-main">
+          <span class="chat-hit-title">${escapeHtml(h.title)}</span>
+          ${h.preview ? `<span class="chat-hit-preview">${escapeHtml(h.preview)}</span>` : ""}
+        </span>
+        ${h.updatedAt ? `<span class="chat-hit-time">${escapeHtml(formatChatTime(h.updatedAt))}</span>` : ""}
+      </button>`
+      )
+      .join("");
+    panel = `<div class="chat-search-panel"><div class="chat-search-status">${escapeHtml(status)}</div>${
+      rows || `<div class="chat-search-status">没有匹配的聊天记录</div>`
+    }</div>`;
+  }
+  return `<div class="account-search-row"><input id="chat-search-input" class="account-search" type="text" placeholder="搜索全部账号的聊天记录" value="${escapeHtml(chatSearchQuery)}" />${panel}</div>`;
+}
+
+async function runChatSearch(): Promise<void> {
+  const q = chatSearchQuery.trim();
+  if (q === "") {
+    chatSearchResult = null;
+    chatSearchError = "";
+    render();
+    return;
+  }
+  chatSearchLoading = true;
+  chatSearchError = "";
+  render();
+  document.querySelector<HTMLInputElement>("#chat-search-input")?.focus();
+  try {
+    chatSearchResult = await invoke<GlobalSearchResult>("search_global_chats", { query: q });
+  } catch (err) {
+    chatSearchResult = null;
+    chatSearchError = `搜索失败：${String(err)}`;
+  } finally {
+    chatSearchLoading = false;
+    render();
+  }
 }
 
 function render(): void {
@@ -1357,6 +1424,37 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     document.querySelectorAll<HTMLElement>("[data-search-text]").forEach((row) => {
       const text = row.dataset.searchText ?? "";
       row.style.display = q === "" || text.includes(q) ? "" : "none";
+    });
+  });
+
+  const chatInput = document.querySelector<HTMLInputElement>("#chat-search-input");
+  chatInput?.addEventListener("input", () => {
+    chatSearchQuery = chatInput.value;
+    window.clearTimeout(chatSearchTimer);
+    if (chatSearchQuery.trim() === "") {
+      chatSearchResult = null;
+      chatSearchError = "";
+      render();
+      return;
+    }
+    chatSearchTimer = window.setTimeout(() => {
+      void runChatSearch();
+    }, 800);
+  });
+  chatInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      window.clearTimeout(chatSearchTimer);
+      void runChatSearch();
+    }
+  });
+
+  document.querySelectorAll<HTMLElement>("[data-chat-uuid]").forEach((el) => {
+    el.addEventListener("click", async () => {
+      const uuid = el.dataset.chatUuid;
+      const sessionId = el.dataset.chatSession;
+      if (uuid && sessionId) {
+        await callCommand("open_global_chat", { providerId: "muse", uuid, sessionId });
+      }
     });
   });
 

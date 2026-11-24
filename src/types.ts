@@ -84,6 +84,21 @@ export interface ManagerSnapshot {
   warmViewCount: number;
 }
 
+export interface GlobalChatHit {
+  uuid: string;
+  alias: string;
+  sessionId: string;
+  title: string;
+  preview: string;
+  updatedAt: string | null;
+}
+
+export interface GlobalSearchResult {
+  results: GlobalChatHit[];
+  searchedCount: number;
+  failedAliases: string[];
+}
+
 export interface UpdateCheckResult {
   currentVersion: string;
   latestVersion: string;

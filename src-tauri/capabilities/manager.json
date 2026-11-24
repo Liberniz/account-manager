@@ -2,8 +2,13 @@
   "identifier": "manager-local-only",
   "description": "Grant account management commands strictly to the local manager webview",
   "local": true,
-  "windows": ["main", "manager"],
-  "webviews": ["manager"],
+  "windows": [
+    "main",
+    "manager"
+  ],
+  "webviews": [
+    "manager"
+  ],
   "permissions": [
     "core:event:allow-listen",
     "core:event:allow-unlisten",
@@ -34,6 +39,8 @@
     "allow-open-external-url",
     "allow-get-notification-status",
     "allow-send-test-notification",
-    "allow-open-notification-settings"
+    "allow-open-notification-settings",
+    "allow-search-global-chats",
+    "allow-open-global-chat"
   ]
 }

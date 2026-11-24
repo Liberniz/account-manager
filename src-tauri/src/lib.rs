@@ -4,7 +4,7 @@ mod session_manager;
 mod storage;
 mod updater;
 
-use session_manager::{ManagerSnapshot, SessionManager, APP_TITLE};
+use session_manager::{GlobalSearchResult, ManagerSnapshot, SessionManager, APP_TITLE};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 use updater::{InstallUpdateOutcome, InstallUpdateRequest, UpdateCheckResult};
@@ -233,6 +233,26 @@ async fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn search_global_chats(
+  app: AppHandle,
+  mgr: State<'_, Arc<SessionManager>>,
+  query: String,
+) -> Result<GlobalSearchResult, String> {
+  mgr.search_global_chats(&app, &query).await
+}
+
+#[tauri::command]
+async fn open_global_chat(
+  app: AppHandle,
+  mgr: State<'_, Arc<SessionManager>>,
+  provider_id: String,
+  uuid: String,
+  session_id: String,
+) -> Result<ManagerSnapshot, String> {
+  mgr.open_global_chat(&app, &provider_id, &uuid, &session_id).await
+}
+
+#[tauri::command]
 async fn get_notification_status(app: AppHandle) -> Result<String, String> {
   Ok(SessionManager::notification_auth_status(&app).await)
 }
@@ -418,6 +438,8 @@ pub fn run() {
       check_for_updates,
       download_and_install_update,
       open_external_url,
+      search_global_chats,
+      open_global_chat,
       get_notification_status,
       send_test_notification,
       open_notification_settings,

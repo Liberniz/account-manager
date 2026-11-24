@@ -9,7 +9,7 @@ use crate::storage::{
 };
 #[cfg(target_os = "macos")]
 use crate::storage::normalize_proxy_url;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 #[cfg(desktop)]
 use std::collections::HashSet;
@@ -1045,6 +1045,104 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
   }
 })()"#;
 
+/// 全局聊天搜索的页面脚本（WKWebView 的 evaluateJavaScript 不等 Promise，
+/// 所以分两段：kickoff 把异步 fetch 挂到 window 全局上，poll 同步读取结果）。
+/// 数据优先走站点自己的会话列表接口（与官方侧边栏同一数据源），
+/// 拿不到时退回抓页面里的会话链接（DOM 兜底）。
+const CHAT_SEARCH_KICKOFF_JS: &str = r#"(() => {
+  window.__maamChatSearch = 'pending';
+  (async () => {
+    const done = (o) => {
+      try { window.__maamChatSearch = JSON.stringify(o); }
+      catch (_) { window.__maamChatSearch = '{"ok":false,"err":"stringify","items":[]}'; }
+    };
+    try {
+      const r = await fetch('/api/session/list', {
+        credentials: 'include',
+        headers: { 'Accept': 'application/json' },
+      });
+      if (r.ok) {
+        const j = await r.json();
+        const arr = Array.isArray(j) ? j : (j.sessions || j.data || j.items || j.results || []);
+        const items = [];
+        for (const it of arr) {
+          const id = it && (it.id || it.sessionId || it.session_id);
+          if (!id) continue;
+          items.push({
+            id: String(id),
+            title: String(it.title || it.name || ''),
+            preview: String(it.preview || it.lastMessage || it.last_message || ''),
+            updated: it.updatedAt || it.updated_at || it.lastActiveAt || it.last_active_at || it.createdAt || null,
+          });
+        }
+        done({ ok: true, via: 'api', items });
+        return;
+      }
+      done({ ok: false, err: 'http ' + r.status, items: [] });
+    } catch (e) {
+      try {
+        const items = [];
+        const seen = new Set();
+        document.querySelectorAll('a[href]').forEach((a) => {
+          const href = a.getAttribute('href') || '';
+          const m = href.match(/\/(?:chat|sessions?)\/([A-Za-z0-9_-]{6,})/);
+          if (m && !seen.has(m[1])) {
+            seen.add(m[1]);
+            items.push({ id: m[1], title: (a.textContent || '').trim().slice(0, 140), preview: '', updated: null });
+          }
+        });
+        done({ ok: items.length > 0, via: 'dom', err: String(e), items });
+      } catch (e2) {
+        done({ ok: false, err: String(e2), items: [] });
+      }
+    }
+  })();
+  return 'started';
+})()"#;
+
+const CHAT_SEARCH_POLL_JS: &str = r#"(() => {
+  const v = window.__maamChatSearch;
+  return typeof v === 'string' ? v : 'pending';
+})()"#;
+
+#[derive(Debug, Clone, Deserialize)]
+struct ChatSearchItem {
+  id: String,
+  #[serde(default)]
+  title: String,
+  #[serde(default)]
+  preview: String,
+  #[serde(default)]
+  updated: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ChatSearchPayload {
+  #[serde(default)]
+  ok: bool,
+  #[serde(default)]
+  items: Vec<ChatSearchItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalChatHit {
+  pub uuid: String,
+  pub alias: String,
+  pub session_id: String,
+  pub title: String,
+  pub preview: String,
+  pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalSearchResult {
+  pub results: Vec<GlobalChatHit>,
+  pub searched_count: usize,
+  pub failed_aliases: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagerSnapshot {
@@ -1122,6 +1220,7 @@ struct InnerState {
   quota_probe_cursor: usize,
   #[cfg(desktop)]
   quota_probe_running: bool,
+  chat_search_running: bool,
 }
 
 /// 新式通知通道投递失败过的标记（进程内）：旧通道登记后新式状态可能
@@ -1181,6 +1280,7 @@ impl SessionManager {
         quota_probe_cursor: 0,
         #[cfg(desktop)]
         quota_probe_running: false,
+        chat_search_running: false,
       }),
     }
   }
@@ -4553,6 +4653,257 @@ impl SessionManager {
       pending_hotkey,
       session_state,
     })
+  }
+
+  /// 通用 JS 求值：回调拿到的原始值按 JSON 字符串解开（与身份探针同款约定）。
+  async fn eval_js_string(webview: &tauri::Webview, js: &str, timeout_ms: u64) -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let tx_cell = Arc::new(std::sync::Mutex::new(Some(tx)));
+    let tx_inner = Arc::clone(&tx_cell);
+    webview
+      .eval_with_callback(js, move |raw| {
+        if let Some(sender) = tx_inner.lock().unwrap().take() {
+          let _ = sender.send(raw);
+        }
+      })
+      .ok()?;
+    let raw = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx)
+      .await
+      .ok()?
+      .ok()?;
+    serde_json::from_str::<String>(&raw).ok()
+  }
+
+  /// 在一个已加载 muse.ai 的视图里跑全局搜索脚本：kickoff 后轮询结果。
+  async fn eval_chat_search(webview: &tauri::Webview) -> Option<ChatSearchPayload> {
+    Self::eval_js_string(webview, CHAT_SEARCH_KICKOFF_JS, 1500).await?;
+    for _ in 0..24 {
+      tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+      if let Some(v) = Self::eval_js_string(webview, CHAT_SEARCH_POLL_JS, 1200).await {
+        if v != "pending" {
+          return serde_json::from_str::<ChatSearchPayload>(&v).ok();
+        }
+      }
+    }
+    None
+  }
+
+  /// 冷账号：临时拉起一个隐藏视图（与额度探测同款脚手架），搜完即关。
+  async fn search_via_transient_view(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    account: &AccountRecord,
+    view_instance_id: u64,
+  ) -> Option<ChatSearchPayload> {
+    let key = AccountKey {
+      provider_id: account.provider_id,
+      uuid: account.uuid.clone(),
+    };
+    let parsed_uuid = Uuid::parse_str(&account.uuid).ok()?;
+    let app_data_dir = {
+      let locked = self.inner.lock().await;
+      locked.app_data_dir.clone()
+    };
+    let profile_dir = app_data_dir.join("profiles").join(&account.uuid);
+    let proxy_url = self.effective_proxy_url().await;
+    let allow_blank = Arc::new(AtomicBool::new(true));
+    let alive_flag = Arc::new(AtomicBool::new(true));
+    let webview_label = format!("account-{view_instance_id}");
+    let builder = self.build_desktop_account_webview(
+      app,
+      key.clone(),
+      parsed_uuid,
+      &profile_dir,
+      &webview_label,
+      view_instance_id,
+      allow_blank,
+      alive_flag,
+      proxy_url,
+      account.teleagent_token.clone(),
+      account.gd_cookie.clone(),
+      account.gd_domain.clone(),
+    );
+    let main_win = app.get_window("main")?;
+    let (init_pos, init_size) = Self::initial_hidden_child_rect(&main_win);
+    let created_wv = main_win.add_child(builder, init_pos, init_size).ok()?;
+    let _ = created_wv.hide();
+    platform::verify_desktop_profile_binding(&created_wv, parsed_uuid, &profile_dir)
+      .await
+      .ok()?;
+    let _ = created_wv.navigate(entry_url_for(account));
+    for _ in 0..30 {
+      if Self::eval_paint_ready(&created_wv).await {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    Self::eval_chat_search(&created_wv).await
+  }
+
+  /// 搜一个账号：有活视图直接用，没有就走临时视图。
+  async fn search_one_account(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    account: &AccountRecord,
+  ) -> Option<ChatSearchPayload> {
+    let key = AccountKey {
+      provider_id: account.provider_id,
+      uuid: account.uuid.clone(),
+    };
+    let warm_label = {
+      let locked = self.inner.lock().await;
+      locked.warm_pool.get(&key).map(|e| e.webview_label.clone())
+    };
+    if let Some(label) = warm_label {
+      if let Some(wv) = app.get_webview(&label) {
+        return Self::eval_chat_search(&wv).await;
+      }
+    }
+    let vid = self.view_counter.fetch_add(1, Ordering::SeqCst);
+    {
+      let mut locked = self.inner.lock().await;
+      locked.transient_probes.insert((key.clone(), vid));
+    }
+    let result = self.search_via_transient_view(app, account, vid).await;
+    if let Some(wv) = app.get_webview(&format!("account-{vid}")) {
+      let _ = wv.close();
+    }
+    let mut locked = self.inner.lock().await;
+    locked.transient_probes.remove(&(key, vid));
+    result
+  }
+
+  /// 全局聊天搜索：逐个 Muse 账号拉会话列表，按标题/预览匹配关键词。
+  /// 活视图账号先搜（快），冷账号逐个临时加载（慢），结果按更新时间倒序。
+  pub async fn search_global_chats(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    query: &str,
+  ) -> Result<GlobalSearchResult, String> {
+    {
+      let mut locked = self.inner.lock().await;
+      if locked.chat_search_running {
+        return Err("上一次搜索还在进行中".to_string());
+      }
+      locked.chat_search_running = true;
+    }
+    let result = self.search_global_chats_inner(app, query).await;
+    let mut locked = self.inner.lock().await;
+    locked.chat_search_running = false;
+    result
+  }
+
+  async fn search_global_chats_inner(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    query: &str,
+  ) -> Result<GlobalSearchResult, String> {
+    let q = query.trim().to_lowercase();
+    let (mut warm_accounts, mut cold_accounts) = {
+      let locked = self.inner.lock().await;
+      let mut warm = Vec::new();
+      let mut cold = Vec::new();
+      for a in locked.store.accounts.iter() {
+        if a.provider_id != ProviderId::Muse {
+          continue;
+        }
+        let k = AccountKey {
+          provider_id: a.provider_id,
+          uuid: a.uuid.clone(),
+        };
+        if locked.store.pending_cleanup.contains(&k) {
+          continue;
+        }
+        if locked.warm_pool.contains_key(&k) {
+          warm.push(a.clone());
+        } else {
+          cold.push(a.clone());
+        }
+      }
+      (warm, cold)
+    };
+    let mut ordered = Vec::new();
+    ordered.append(&mut warm_accounts);
+    ordered.append(&mut cold_accounts);
+
+    let mut results: Vec<GlobalChatHit> = Vec::new();
+    let mut searched_count = 0usize;
+    let mut failed_aliases: Vec<String> = Vec::new();
+    for account in &ordered {
+      match self.search_one_account(app, account).await {
+        Some(payload) if payload.ok => {
+          searched_count += 1;
+          for item in payload.items {
+            let title_l = item.title.to_lowercase();
+            let preview_l = item.preview.to_lowercase();
+            if q.is_empty() || title_l.contains(&q) || preview_l.contains(&q) {
+              results.push(GlobalChatHit {
+                uuid: account.uuid.clone(),
+                alias: account.alias.clone(),
+                session_id: item.id,
+                title: if item.title.trim().is_empty() {
+                  "（无标题会话）".to_string()
+                } else {
+                  item.title
+                },
+                preview: item.preview,
+                updated_at: item.updated,
+              });
+            }
+          }
+        }
+        _ => failed_aliases.push(account.alias.clone()),
+      }
+    }
+    results.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    results.truncate(100);
+    Ok(GlobalSearchResult {
+      results,
+      searched_count,
+      failed_aliases,
+    })
+  }
+
+  /// 打开一条全局搜索结果：切到该账号，再把它的视图导航到会话页。
+  /// 导航延迟执行并校验前台账号未变，避免与切号自身的首屏加载抢方向。
+  pub async fn open_global_chat(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    raw_provider: &str,
+    raw_uuid: &str,
+    session_id: &str,
+  ) -> Result<ManagerSnapshot, String> {
+    let snapshot = self.switch_account(app, raw_provider, raw_uuid).await?;
+    let provider_id =
+      ProviderId::parse(raw_provider).ok_or_else(|| "无效的服务标识".to_string())?;
+    let key = AccountKey {
+      provider_id,
+      uuid: raw_uuid.to_string(),
+    };
+    let url = format!("https://muse.ai/chat/{session_id}");
+    let mgr = Arc::clone(self);
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+      tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+      let label = {
+        let locked = mgr.inner.lock().await;
+        let is_active =
+          locked.active_slot.as_ref().map(|s| &s.account_key) == Some(&key);
+        if is_active {
+          locked.warm_pool.get(&key).map(|e| e.webview_label.clone())
+        } else {
+          None
+        }
+      };
+      if let Some(label) = label {
+        if let Some(wv) = app2.get_webview(&label) {
+          if let Ok(u) = Url::parse(&url) {
+            let _ = wv.navigate(u);
+          }
+        }
+      }
+    });
+    Ok(snapshot)
   }
 
   fn is_view_instance_valid(locked: &InnerState, key: &AccountKey, view_instance_id: u64) -> bool {
