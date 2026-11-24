@@ -1124,6 +1124,10 @@ struct InnerState {
   quota_probe_running: bool,
 }
 
+/// 新式通知通道投递失败过的标记（进程内）：旧通道登记后新式状态可能
+/// 显示已授权、实际投递仍被系统拒绝，失败一次就记住，后续直接走旧通道。
+static UN_DELIVERY_BROKEN: AtomicBool = AtomicBool::new(false);
+
 pub struct SessionManager {
   current_seq: Arc<AtomicU64>,
   active_view_id: Arc<AtomicU64>,
@@ -4674,7 +4678,13 @@ impl SessionManager {
   /// 并自动改走旧式通道投递一条，一次定位问题出在哪一层。
   pub async fn send_test_notification(app: &AppHandle) -> Result<String, String> {
     const TEST_TITLE: &str = "叠号 · 测试通知";
-    const TEST_BODY: &str = "能看到这条通知，说明审批与完成提醒可以正常送达。";
+    // 带唯一标记：内容完全相同的通知重复投递时系统不再弹横幅，
+    // 测试按钮要能反复验证就必须让每条都不一样。
+    let test_body = format!(
+      "能看到这条通知，说明审批与完成提醒可以正常送达。（#{:05}）",
+      now_ms() % 100_000
+    );
+    let test_body: &str = &test_body;
     match Self::notification_auth_status(app).await.as_str() {
       "denied" => Err(
         "系统通知已被关闭，请先到 系统设置 → 通知 → 叠号 中开启，再回来测试。".to_string(),
@@ -4682,11 +4692,11 @@ impl SessionManager {
       "not_determined" => {
         let (granted, err) = Self::request_notification_authorization(app).await;
         if granted {
-          Self::notify(app, TEST_TITLE, TEST_BODY, Some("maam-test".to_string()));
+          Self::notify(app, TEST_TITLE, test_body, Some("maam-test".to_string()));
           Ok("测试通知已发出，请看屏幕右上角或打开通知中心确认。".to_string())
         } else {
           let reason = err.unwrap_or_else(|| "无错误信息".to_string());
-          let (t, b) = (TEST_TITLE.to_string(), TEST_BODY.to_string());
+          let (t, b) = (TEST_TITLE.to_string(), test_body.to_string());
           let _ = app.run_on_main_thread(move || Self::post_notification_legacy(&t, &b));
           Ok(format!(
             "新式授权被系统无弹窗拒绝：{reason}。已改用旧式通道投递一条测试通知，请看通知中心是否出现；若系统设置 → 通知 里现在能搜到「叠号」，说明旧通道登记成功。"
@@ -4694,7 +4704,7 @@ impl SessionManager {
         }
       }
       _ => {
-        Self::notify(app, TEST_TITLE, TEST_BODY, Some("maam-test".to_string()));
+        Self::notify(app, TEST_TITLE, test_body, Some("maam-test".to_string()));
         Ok("测试通知已发出，请看屏幕右上角或打开通知中心确认。".to_string())
       }
     }
@@ -4721,13 +4731,14 @@ impl SessionManager {
       UNNotificationRequest::requestWithIdentifier_content_trigger(&identifier, &content, None);
     let err_block = block2::RcBlock::new(move |err: *mut objc2_foundation::NSError| {
       if !err.is_null() {
+        UN_DELIVERY_BROKEN.store(true, Ordering::Relaxed);
         let desc = unsafe {
           err
             .as_ref()
             .map(|e| e.localizedDescription().to_string())
             .unwrap_or_default()
         };
-        eprintln!("[notify] 投递失败: {desc}");
+        eprintln!("[notify] 新式通道投递失败，后续改走旧通道: {desc}");
       }
     });
     center.addNotificationRequest_withCompletionHandler(&request, Some(&err_block));
@@ -4741,11 +4752,22 @@ impl SessionManager {
     use objc2_foundation::{
       NSUserNotification, NSUserNotificationCenter, NSUserNotificationDefaultSoundName, NSString,
     };
+    let center = NSUserNotificationCenter::defaultUserNotificationCenter();
+    // 同标题的旧通知先撤下再投新的：同一账号再次等审批这类重复事件，
+    // 标题正文与上一条完全相同，若旧的还留在通知中心，新的会被系统
+    // 静默堆叠、不再弹横幅，看起来就像「一直不通知」。
+    let delivered = center.deliveredNotifications();
+    for i in 0..delivered.count() {
+      let old = delivered.objectAtIndex(i);
+      if old.title().map(|t| t.to_string()).as_deref() == Some(title) {
+        center.removeDeliveredNotification(&old);
+      }
+    }
     let notification = NSUserNotification::new();
     notification.setTitle(Some(&NSString::from_str(title)));
     notification.setInformativeText(Some(&NSString::from_str(body)));
     notification.setSoundName(Some(unsafe { NSUserNotificationDefaultSoundName }));
-    NSUserNotificationCenter::defaultUserNotificationCenter().deliverNotification(&notification);
+    center.deliverNotification(&notification);
   }
 
   /// 发送 macOS 系统通知（状态跃迁时调用，调用方负责去重）。
@@ -4757,6 +4779,12 @@ impl SessionManager {
     let title = title.to_string();
     let body = body.to_string();
     tauri::async_runtime::spawn(async move {
+      if UN_DELIVERY_BROKEN.load(Ordering::Relaxed) {
+        let _ = app.run_on_main_thread(move || {
+          Self::post_notification_legacy(&title, &body);
+        });
+        return;
+      }
       match Self::notification_auth_status(&app).await.as_str() {
         "authorized" | "provisional" => {
           let _ = app.run_on_main_thread(move || {

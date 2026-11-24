@@ -1,6 +1,6 @@
 [package]
 name = "multi-agent-account-manager"
-version = "0.6.3"
+version = "0.6.4"
 edition = "2021"
 rust-version = "1.85"
 
@@ -24,6 +24,6 @@ reqwest = { version = "0.13", default-features = false, features = ["native-tls"
 sha2 = "0.10"
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSUUID", "NSString", "NSError", "NSUserNotification", "block2"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSUUID", "NSString", "NSError", "NSUserNotification", "NSArray", "block2"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSView", "NSResponder"] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["objc2-app-kit", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "block2"] }
