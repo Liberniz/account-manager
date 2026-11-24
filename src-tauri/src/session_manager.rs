@@ -1388,6 +1388,8 @@ impl SessionManager {
 
   pub async fn run_startup_tasks(self: &Arc<Self>, app: &AppHandle) {
 
+    self.ensure_notification_authorization(app).await;
+
     self.retry_pending_cleanups(app).await;
 
     let mgr_periodic = Arc::clone(self);
@@ -1992,7 +1994,7 @@ impl SessionManager {
     };
     self.emit_snapshot(app, &snap);
     if let Some((title, body)) = notice {
-      Self::notify(app, &title, &body);
+      Self::notify(app, &title, &body, Some(format!("account-{}", key.uuid)));
     }
   }
 
@@ -4563,31 +4565,190 @@ impl SessionManager {
     }
   }
 
-  /// 发送 macOS 系统通知（状态跃迁时调用，调用方负责去重）。
-  /// 经 UserNotifications 框架投递，需在主线程调用其 API，故切回主线程执行；
-  /// 首次投递时顺带请求通知授权。
-  fn notify(app: &AppHandle, title: &str, body: &str) {
-    let title = title.to_string();
-    let body = body.to_string();
+  /// 查询系统通知授权状态：authorized / provisional / denied /
+  /// not_determined / unknown。旧实现从不查状态：未授权时投递被系统
+  /// 静默丢弃、且失败无任何回执，是通知「发了却不到」的根源。
+  pub async fn notification_auth_status(app: &AppHandle) -> String {
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let tx = std::sync::Mutex::new(Some(tx));
     let _ = app.run_on_main_thread(move || {
-      use objc2_foundation::NSString;
       use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
-        UNUserNotificationCenter,
+        UNAuthorizationStatus, UNNotificationSettings, UNUserNotificationCenter,
       };
       let center = UNUserNotificationCenter::currentNotificationCenter();
-      let auth_block = block2::RcBlock::new(|_granted: objc2::runtime::Bool, _err: *mut objc2_foundation::NSError| {});
-      center.requestAuthorizationWithOptions_completionHandler(
-        UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
-        &auth_block,
+      let block = block2::RcBlock::new(
+        move |settings: std::ptr::NonNull<UNNotificationSettings>| {
+          let status = unsafe { settings.as_ref().authorizationStatus() };
+          let label = if status == UNAuthorizationStatus::Authorized {
+            "authorized"
+          } else if status == UNAuthorizationStatus::Provisional
+            || status == UNAuthorizationStatus::Ephemeral
+          {
+            "provisional"
+          } else if status == UNAuthorizationStatus::Denied {
+            "denied"
+          } else if status == UNAuthorizationStatus::NotDetermined {
+            "not_determined"
+          } else {
+            "unknown"
+          };
+          if let Ok(mut slot) = tx.lock() {
+            if let Some(tx) = slot.take() {
+              let _ = tx.send(label.to_string());
+            }
+          }
+        },
       );
-      let content = UNMutableNotificationContent::new();
-      content.setTitle(&NSString::from_str(&title));
-      content.setBody(&NSString::from_str(&body));
-      let identifier = NSString::from_str(&format!("maam-{}", now_ms()));
-      let request =
-        UNNotificationRequest::requestWithIdentifier_content_trigger(&identifier, &content, None);
-      center.addNotificationRequest_withCompletionHandler(&request, None);
+      center.getNotificationSettingsWithCompletionHandler(&block);
+    });
+    rx.await.unwrap_or_else(|_| "unknown".to_string())
+  }
+
+  /// 请求系统通知授权，返回用户是否同意。仅在状态为 not_determined 时
+  /// 调用才有意义（系统只在未决定时弹窗）。
+  pub async fn request_notification_authorization(app: &AppHandle) -> bool {
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    let tx = std::sync::Mutex::new(Some(tx));
+    let _ = app.run_on_main_thread(move || {
+      use objc2_user_notifications::{UNAuthorizationOptions, UNUserNotificationCenter};
+      let center = UNUserNotificationCenter::currentNotificationCenter();
+      let block = block2::RcBlock::new(
+        move |granted: objc2::runtime::Bool, _err: *mut objc2_foundation::NSError| {
+          if let Ok(mut slot) = tx.lock() {
+            if let Some(tx) = slot.take() {
+              let _ = tx.send(granted.as_bool());
+            }
+          }
+        },
+      );
+      center.requestAuthorizationWithOptions_completionHandler(
+        UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound | UNAuthorizationOptions::Badge,
+        &block,
+      );
+    });
+    rx.await.unwrap_or(false)
+  }
+
+  /// 启动时处理通知授权：未决定则趁应用在前台申请一次（弹窗可见）；
+  /// 已被系统拒绝则在界面提示条里指明去向（不覆盖已有提示）。
+  pub async fn ensure_notification_authorization(self: &Arc<Self>, app: &AppHandle) {
+    match Self::notification_auth_status(app).await.as_str() {
+      "not_determined" => {
+        let _ = Self::request_notification_authorization(app).await;
+      }
+      "denied" => {
+        let snap = {
+          let mut locked = self.inner.lock().await;
+          if locked.notice.is_some() {
+            None
+          } else {
+            locked.notice = Some(
+              "系统通知已被关闭，审批 / 完成提醒弹不出来。请到 系统设置 → 通知 → 叠号 中开启，或点左下角「通知」发一条测试通知确认。"
+                .to_string(),
+            );
+            Some(Self::snapshot_from_locked(&locked))
+          }
+        };
+        if let Some(snap) = snap {
+          self.emit_snapshot(app, &snap);
+        }
+      }
+      _ => {}
+    }
+  }
+
+  /// 发送一条测试通知（供「通知」面板验证整条投递链路）。
+  pub async fn send_test_notification(app: &AppHandle) -> Result<(), String> {
+    match Self::notification_auth_status(app).await.as_str() {
+      "denied" => Err(
+        "系统通知已被关闭，请先到 系统设置 → 通知 → 叠号 中开启，再回来测试。".to_string(),
+      ),
+      "not_determined" => {
+        if Self::request_notification_authorization(app).await {
+          Self::notify(
+            app,
+            "叠号 · 测试通知",
+            "能看到这条通知，说明审批与完成提醒可以正常送达。",
+            Some("maam-test".to_string()),
+          );
+          Ok(())
+        } else {
+          Err("刚才没有同意通知授权，测试通知没有发出。".to_string())
+        }
+      }
+      _ => {
+        Self::notify(
+          app,
+          "叠号 · 测试通知",
+          "能看到这条通知，说明审批与完成提醒可以正常送达。",
+          Some("maam-test".to_string()),
+        );
+        Ok(())
+      }
+    }
+  }
+
+  /// 真正向通知中心投递一条通知（须在主线程调用）。带完成回执：
+  /// 失败写 stderr，不再像旧实现那样传 None 把错误吞掉。
+  fn post_notification(title: &str, body: &str, thread: Option<&str>) {
+    use objc2_foundation::NSString;
+    use objc2_user_notifications::{
+      UNMutableNotificationContent, UNNotificationRequest, UNNotificationSound,
+      UNUserNotificationCenter,
+    };
+    let center = UNUserNotificationCenter::currentNotificationCenter();
+    let content = UNMutableNotificationContent::new();
+    content.setTitle(&NSString::from_str(title));
+    content.setBody(&NSString::from_str(body));
+    content.setSound(Some(&UNNotificationSound::defaultSound()));
+    if let Some(thread) = thread {
+      content.setThreadIdentifier(&NSString::from_str(thread));
+    }
+    let identifier = NSString::from_str(&format!("maam-{}", now_ms()));
+    let request =
+      UNNotificationRequest::requestWithIdentifier_content_trigger(&identifier, &content, None);
+    let err_block = block2::RcBlock::new(move |err: *mut objc2_foundation::NSError| {
+      if !err.is_null() {
+        let desc = unsafe {
+          err
+            .as_ref()
+            .map(|e| e.localizedDescription().to_string())
+            .unwrap_or_default()
+        };
+        eprintln!("[notify] 投递失败: {desc}");
+      }
+    });
+    center.addNotificationRequest_withCompletionHandler(&request, Some(&err_block));
+  }
+
+  /// 发送 macOS 系统通知（状态跃迁时调用，调用方负责去重）。
+  /// 先查授权状态再投递：authorized / provisional 直接发；未决定则先
+  /// 申请、同意后补发这一条；已被拒绝只记日志（启动时已提示过用户），
+  /// 不再出现「调用了通知 API 却永远不到」的情况。
+  fn notify(app: &AppHandle, title: &str, body: &str, thread: Option<String>) {
+    let app = app.clone();
+    let title = title.to_string();
+    let body = body.to_string();
+    tauri::async_runtime::spawn(async move {
+      match Self::notification_auth_status(&app).await.as_str() {
+        "authorized" | "provisional" => {
+          let _ = app.run_on_main_thread(move || {
+            Self::post_notification(&title, &body, thread.as_deref());
+          });
+        }
+        "not_determined" => {
+          if Self::request_notification_authorization(&app).await {
+            let _ = app.run_on_main_thread(move || {
+              Self::post_notification(&title, &body, thread.as_deref());
+            });
+          } else {
+            eprintln!("[notify] 未获授权，丢弃通知: {title}");
+          }
+        }
+        other => {
+          eprintln!("[notify] 授权状态为 {other}，丢弃通知: {title}");
+        }
+      }
     });
   }
 
@@ -4648,6 +4809,7 @@ impl SessionManager {
         app,
         "登录已过期",
         &format!("账号「{alias}」的登录已失效，打开该账号即可重新登录"),
+        Some(format!("account-{}", key.uuid)),
       );
     }
   }
@@ -4811,7 +4973,7 @@ impl SessionManager {
     let (snap, quota_notice) = snap_opt;
     self.emit_snapshot(app, &snap);
     if let Some((title, body)) = quota_notice {
-      Self::notify(app, title, &body);
+      Self::notify(app, title, &body, Some(format!("account-{}", key.uuid)));
     }
   }
 }

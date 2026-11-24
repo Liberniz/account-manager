@@ -232,6 +232,22 @@ async fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
   updater::open_external_url(&app, &url).await
 }
 
+#[tauri::command]
+async fn get_notification_status(app: AppHandle) -> Result<String, String> {
+  Ok(SessionManager::notification_auth_status(&app).await)
+}
+
+#[tauri::command]
+async fn send_test_notification(app: AppHandle) -> Result<(), String> {
+  SessionManager::send_test_notification(&app).await
+}
+
+#[tauri::command]
+async fn open_notification_settings() -> Result<(), String> {
+  open::that("x-apple.systempreferences:com.apple.preference.notifications")
+    .map_err(|e| format!("打开系统设置失败: {e}"))
+}
+
 pub fn run() {
   tauri::Builder::default()
     .setup(|app| {
@@ -402,6 +418,9 @@ pub fn run() {
       check_for_updates,
       download_and_install_update,
       open_external_url,
+      get_notification_status,
+      send_test_notification,
+      open_notification_settings,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

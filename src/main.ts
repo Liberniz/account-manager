@@ -23,6 +23,7 @@ type ModalMode =
   | { kind: "rename"; account: AccountRecord; draft: string; noteDraft: string }
   | { kind: "remove"; account: AccountRecord }
   | { kind: "proxy"; draft: string; warmLimit: string; followSystem: boolean }
+  | { kind: "notify"; status: string; testNote: string }
   | { kind: "update" };
 
 const PROVIDER_LOGOS: Record<ProviderId, { src: string; fullBleed: boolean }> = {
@@ -47,6 +48,7 @@ const ICON_TRASH = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" 
 const ICON_USER_PLUS = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>`;
 const ICON_UPDATE = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
 const ICON_PROXY = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`;
+const ICON_BELL = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>`;
 
 let snapshot: ManagerSnapshot | null = null;
 let modal: ModalMode = { kind: "none" };
@@ -743,6 +745,33 @@ function renderModal(provider: ProviderInfo): string {
       </div>
     `;
   }
+  if (modal.kind === "notify") {
+    const statusText =
+      modal.status === "authorized"
+        ? "已开启"
+        : modal.status === "provisional"
+          ? "已开启（静默投递，进通知中心但不弹横幅）"
+          : modal.status === "denied"
+            ? "已被系统关闭"
+            : modal.status === "not_determined"
+              ? "尚未决定（发送测试通知时会弹出授权请求）"
+              : "未知";
+    return `
+      <div class="inline-modal" role="dialog" aria-modal="true">
+        <div class="modal-card">
+          <div class="modal-title">系统通知</div>
+          <div class="modal-desc">后台账号等待审批、会话完成、登录过期时，叠号会通过 macOS 通知中心提醒你；你正在看的那个账号不会打扰。通知按账号分组，点开通知会回到叠号。</div>
+          <div class="modal-desc" style="margin-top:10px;">当前状态：<strong>${escapeHtml(statusText)}</strong></div>
+          ${modal.testNote ? `<div class="modal-desc" style="margin-top:10px;">${escapeHtml(modal.testNote)}</div>` : ""}
+          <div class="modal-footer">
+            <button id="notify-open-settings-btn" class="btn" type="button">打开系统通知设置</button>
+            <button id="notify-test-btn" class="btn" type="button">发送测试通知</button>
+            <button id="modal-cancel-btn" class="btn primary" type="button">关闭</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
   return `
     <div class="inline-modal" role="dialog" aria-modal="true">
       <div class="modal-card">
@@ -1120,6 +1149,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
     <div class="column-footer">
       <span class="footer-brand"><img src="/logos/app-logo.svg" alt="" class="footer-brand-img" draggable="false" />叠号</span>
       <span class="footer-spacer"></span>
+      <button id="notify-settings-btn" class="footer-util-btn" title="系统通知设置" type="button">${ICON_BELL}<span>通知</span></button>
       <button id="proxy-settings-btn" class="footer-util-btn ${state.proxyUrl ? "proxy-active" : ""}" title="${state.proxyUrl ? `代理：${escapeHtml(state.proxyUrl)}` : "代理设置"}" type="button">${ICON_PROXY}<span>代理</span>${state.proxyUrl ? `<span class="update-dot"></span>` : ""}</button>
       <button id="check-update-btn" class="footer-util-btn ${updateState.result?.hasUpdate ? "has-update" : ""}" title="${updateState.result?.hasUpdate ? `发现新版本 v${escapeHtml(updateState.result.latestVersion)}` : "检查更新"}" type="button">${ICON_UPDATE}<span>更新</span>${updateState.result?.hasUpdate ? `<span class="update-dot"></span>` : ""}</button>
     </div>
@@ -1243,6 +1273,44 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
   document.querySelector("#proxy-settings-btn")?.addEventListener("click", async () => {
     if (modal.kind !== "none") return;
     await setModal({ kind: "proxy", draft: state.proxyUrl ?? "", warmLimit: state.warmViewLimit === null ? "" : String(state.warmViewLimit), followSystem: state.proxyFollowSystem });
+  });
+
+  document.querySelector("#notify-settings-btn")?.addEventListener("click", async () => {
+    if (modal.kind !== "none") return;
+    let status = "unknown";
+    try {
+      status = await invoke<string>("get_notification_status");
+    } catch {
+      /* 状态查询失败时按未知展示，测试按钮仍可验证投递 */
+    }
+    await setModal({ kind: "notify", status, testNote: "" });
+  });
+
+  document.querySelector("#notify-test-btn")?.addEventListener("click", async () => {
+    if (modal.kind !== "notify") return;
+    let note: string;
+    try {
+      await invoke("send_test_notification");
+      note = "测试通知已发出，请看屏幕右上角或打开通知中心确认。";
+    } catch (err) {
+      note = String(err);
+    }
+    let status = modal.status;
+    try {
+      status = await invoke<string>("get_notification_status");
+    } catch {
+      /* 保持原状态展示 */
+    }
+    modal = { kind: "notify", status, testNote: note };
+    rerenderPreservingScroll();
+  });
+
+  document.querySelector("#notify-open-settings-btn")?.addEventListener("click", async () => {
+    try {
+      await invoke("open_notification_settings");
+    } catch {
+      /* 打不开时用户可手动前往 系统设置 → 通知 */
+    }
   });
 
   document.querySelector("#check-update-btn")?.addEventListener("click", async () => {
