@@ -238,7 +238,7 @@ async fn get_notification_status(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn send_test_notification(app: AppHandle) -> Result<(), String> {
+async fn send_test_notification(app: AppHandle) -> Result<String, String> {
   SessionManager::send_test_notification(&app).await
 }
 

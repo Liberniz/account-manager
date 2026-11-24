@@ -4604,19 +4604,28 @@ impl SessionManager {
     rx.await.unwrap_or_else(|_| "unknown".to_string())
   }
 
-  /// 请求系统通知授权，返回用户是否同意。仅在状态为 not_determined 时
-  /// 调用才有意义（系统只在未决定时弹窗）。
-  pub async fn request_notification_authorization(app: &AppHandle) -> bool {
-    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+  /// 请求系统通知授权，返回（是否同意，失败原因）。仅在状态为
+  /// not_determined 时调用才有意义（系统只在未决定时弹窗）；
+  /// 无弹窗直接拒绝时，原因里带上系统的错误原文，便于定位。
+  pub async fn request_notification_authorization(app: &AppHandle) -> (bool, Option<String>) {
+    let (tx, rx) = tokio::sync::oneshot::channel::<(bool, Option<String>)>();
     let tx = std::sync::Mutex::new(Some(tx));
     let _ = app.run_on_main_thread(move || {
       use objc2_user_notifications::{UNAuthorizationOptions, UNUserNotificationCenter};
       let center = UNUserNotificationCenter::currentNotificationCenter();
       let block = block2::RcBlock::new(
-        move |granted: objc2::runtime::Bool, _err: *mut objc2_foundation::NSError| {
+        move |granted: objc2::runtime::Bool, err: *mut objc2_foundation::NSError| {
+          let err_text = if err.is_null() {
+            None
+          } else {
+            Some(unsafe {
+              let e = &*err;
+              format!("{}（code {}）", e.localizedDescription(), e.code())
+            })
+          };
           if let Ok(mut slot) = tx.lock() {
             if let Some(tx) = slot.take() {
-              let _ = tx.send(granted.as_bool());
+              let _ = tx.send((granted.as_bool(), err_text));
             }
           }
         },
@@ -4626,7 +4635,7 @@ impl SessionManager {
         &block,
       );
     });
-    rx.await.unwrap_or(false)
+    rx.await.unwrap_or((false, None))
   }
 
   /// 启动时处理通知授权：未决定则趁应用在前台申请一次（弹窗可见）；
@@ -4634,7 +4643,10 @@ impl SessionManager {
   pub async fn ensure_notification_authorization(self: &Arc<Self>, app: &AppHandle) {
     match Self::notification_auth_status(app).await.as_str() {
       "not_determined" => {
-        let _ = Self::request_notification_authorization(app).await;
+        let (granted, err) = Self::request_notification_authorization(app).await;
+        if !granted {
+          eprintln!("[notify] 启动时申请授权未获同意: {err:?}");
+        }
       }
       "denied" => {
         let snap = {
@@ -4657,33 +4669,33 @@ impl SessionManager {
     }
   }
 
-  /// 发送一条测试通知（供「通知」面板验证整条投递链路）。
-  pub async fn send_test_notification(app: &AppHandle) -> Result<(), String> {
+  /// 发送一条测试通知（供「通知」面板验证整条投递链路），返回给面板
+  /// 展示的结果说明。新式授权被无弹窗拒绝时，把系统错误原文带出来，
+  /// 并自动改走旧式通道投递一条，一次定位问题出在哪一层。
+  pub async fn send_test_notification(app: &AppHandle) -> Result<String, String> {
+    const TEST_TITLE: &str = "叠号 · 测试通知";
+    const TEST_BODY: &str = "能看到这条通知，说明审批与完成提醒可以正常送达。";
     match Self::notification_auth_status(app).await.as_str() {
       "denied" => Err(
         "系统通知已被关闭，请先到 系统设置 → 通知 → 叠号 中开启，再回来测试。".to_string(),
       ),
       "not_determined" => {
-        if Self::request_notification_authorization(app).await {
-          Self::notify(
-            app,
-            "叠号 · 测试通知",
-            "能看到这条通知，说明审批与完成提醒可以正常送达。",
-            Some("maam-test".to_string()),
-          );
-          Ok(())
+        let (granted, err) = Self::request_notification_authorization(app).await;
+        if granted {
+          Self::notify(app, TEST_TITLE, TEST_BODY, Some("maam-test".to_string()));
+          Ok("测试通知已发出，请看屏幕右上角或打开通知中心确认。".to_string())
         } else {
-          Err("刚才没有同意通知授权，测试通知没有发出。".to_string())
+          let reason = err.unwrap_or_else(|| "无错误信息".to_string());
+          let (t, b) = (TEST_TITLE.to_string(), TEST_BODY.to_string());
+          let _ = app.run_on_main_thread(move || Self::post_notification_legacy(&t, &b));
+          Ok(format!(
+            "新式授权被系统无弹窗拒绝：{reason}。已改用旧式通道投递一条测试通知，请看通知中心是否出现；若系统设置 → 通知 里现在能搜到「叠号」，说明旧通道登记成功。"
+          ))
         }
       }
       _ => {
-        Self::notify(
-          app,
-          "叠号 · 测试通知",
-          "能看到这条通知，说明审批与完成提醒可以正常送达。",
-          Some("maam-test".to_string()),
-        );
-        Ok(())
+        Self::notify(app, TEST_TITLE, TEST_BODY, Some("maam-test".to_string()));
+        Ok("测试通知已发出，请看屏幕右上角或打开通知中心确认。".to_string())
       }
     }
   }
@@ -4721,9 +4733,24 @@ impl SessionManager {
     center.addNotificationRequest_withCompletionHandler(&request, Some(&err_block));
   }
 
+  /// 旧式通知通道（NSUserNotificationCenter）：新式 UNUserNotificationCenter
+  /// 对未在通知中心登记过的应用会无弹窗直接拒绝授权（实测本应用即如此），
+  /// 旧通道的登记与投递路径不同，作为兜底。须在主线程调用。
+  #[allow(deprecated)]
+  fn post_notification_legacy(title: &str, body: &str) {
+    use objc2_foundation::{
+      NSUserNotification, NSUserNotificationCenter, NSUserNotificationDefaultSoundName, NSString,
+    };
+    let notification = NSUserNotification::new();
+    notification.setTitle(Some(&NSString::from_str(title)));
+    notification.setInformativeText(Some(&NSString::from_str(body)));
+    notification.setSoundName(Some(unsafe { NSUserNotificationDefaultSoundName }));
+    NSUserNotificationCenter::defaultUserNotificationCenter().deliverNotification(&notification);
+  }
+
   /// 发送 macOS 系统通知（状态跃迁时调用，调用方负责去重）。
-  /// 先查授权状态再投递：authorized / provisional 直接发；未决定则先
-  /// 申请、同意后补发这一条；已被拒绝只记日志（启动时已提示过用户），
+  /// 先查授权状态再投递：authorized / provisional 走新式通道；未决定则
+  /// 先申请、同意后补发；申请被无弹窗拒绝或状态异常时改走旧式通道兜底，
   /// 不再出现「调用了通知 API 却永远不到」的情况。
   fn notify(app: &AppHandle, title: &str, body: &str, thread: Option<String>) {
     let app = app.clone();
@@ -4737,16 +4764,23 @@ impl SessionManager {
           });
         }
         "not_determined" => {
-          if Self::request_notification_authorization(&app).await {
+          let (granted, err) = Self::request_notification_authorization(&app).await;
+          if granted {
             let _ = app.run_on_main_thread(move || {
               Self::post_notification(&title, &body, thread.as_deref());
             });
           } else {
-            eprintln!("[notify] 未获授权，丢弃通知: {title}");
+            eprintln!("[notify] 新式授权被拒（{err:?}），改走旧通道: {title}");
+            let _ = app.run_on_main_thread(move || {
+              Self::post_notification_legacy(&title, &body);
+            });
           }
         }
         other => {
-          eprintln!("[notify] 授权状态为 {other}，丢弃通知: {title}");
+          eprintln!("[notify] 授权状态为 {other}，改走旧通道: {title}");
+          let _ = app.run_on_main_thread(move || {
+            Self::post_notification_legacy(&title, &body);
+          });
         }
       }
     });

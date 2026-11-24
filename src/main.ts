@@ -1290,8 +1290,8 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     if (modal.kind !== "notify") return;
     let note: string;
     try {
-      await invoke("send_test_notification");
-      note = "测试通知已发出，请看屏幕右上角或打开通知中心确认。";
+      const msg = await invoke<string>("send_test_notification");
+      note = msg || "测试通知已发出，请看屏幕右上角或打开通知中心确认。";
     } catch (err) {
       note = String(err);
     }
