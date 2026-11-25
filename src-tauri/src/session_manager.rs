@@ -40,140 +40,6 @@ const HIDDEN_VIEW_MAX_WIDTH: f64 = 1100.0;
 #[cfg(desktop)]
 const HIDDEN_VIEW_MAX_HEIGHT: f64 = 720.0;
 
-/// TeleAgent 积分/签到接口（与桌面客户端同源的 sapi 网关）。
-const TELEAGENT_API_BASE: &str = "https://agent.teleai.com.cn/superCowork/sapi";
-/// 请求头里上报的客户端版本，需与用户本机 TeleAgent 客户端大版本保持一致。
-const TELEAGENT_APP_VERSION: &str = "2.7.1";
-
-/// 生成 TeleAgent 视图的初始化脚本：在页面脚本运行前，把 operationToken
-/// 种进 cookie（网页端读 cookie 认定登录态，免走登录页）。值变化时刷新一次
-/// 让 SPA 以新 token 重启；sessionStorage 守卫避免循环刷新。
-fn teleagent_cookie_script(token: &str) -> String {
-  let token = token.trim();
-  if token.is_empty() {
-    return "void 0;".to_string();
-  }
-  let escaped = token
-    .replace('\\', "\\\\")
-    .replace('\'', "\\'")
-    .replace('\n', "")
-    .replace('\r', "");
-  format!(
-    r#"(() => {{
-  try {{
-    if (!/(^|\.)teleai\.com\.cn$/i.test(location.hostname || '')) return;
-    const want = '{escaped}';
-    const m = document.cookie.match(/(?:^|;\s*)operationToken=([^;]*)/);
-    const cur = m ? m[1] : '';
-    if (cur !== want) {{
-      document.cookie = 'operationToken=' + want + '; path=/; max-age=2592000; SameSite=Lax';
-      try {{
-        if (!sessionStorage.getItem('__maam_ta_cookie_reload')) {{
-          sessionStorage.setItem('__maam_ta_cookie_reload', '1');
-          location.reload();
-        }}
-      }} catch (_) {{}}
-    }}
-  }} catch (_) {{}}
-}})();"#
-  )
-}
-
-/// 更新 token 时在已有视图里执行的脚本：种新 cookie 并立即刷新（无守卫）。
-fn teleagent_cookie_reset_script(token: &str) -> String {
-  let token = token.trim();
-  let escaped = token
-    .replace('\\', "\\\\")
-    .replace('\'', "\\'")
-    .replace('\n', "")
-    .replace('\r', "");
-  format!(
-    r#"(() => {{
-  try {{
-    document.cookie = 'operationToken={escaped}; path=/; max-age=2592000; SameSite=Lax';
-    location.reload();
-  }} catch (_) {{}}
-}})();"#
-  )
-}
-
-fn base64url_decode(input: &str) -> Option<Vec<u8>> {
-  fn val(c: u8) -> Option<u32> {
-    match c {
-      b'A'..=b'Z' => Some((c - b'A') as u32),
-      b'a'..=b'z' => Some((c - b'a') as u32 + 26),
-      b'0'..=b'9' => Some((c - b'0') as u32 + 52),
-      b'-' => Some(62),
-      b'_' => Some(63),
-      _ => None,
-    }
-  }
-  let bytes: Vec<u8> = input.bytes().filter(|c| *c != b'=').collect();
-  let mut out = Vec::with_capacity(bytes.len() * 3 / 4 + 3);
-  for chunk in bytes.chunks(4) {
-    let mut acc: u32 = 0;
-    let mut nbits = 0;
-    for &c in chunk {
-      acc = (acc << 6) | val(c)?;
-      nbits += 6;
-    }
-    let total_bytes = nbits / 8;
-    for i in 0..total_bytes {
-      let shift = nbits - 8 * (i + 1);
-      out.push((acc >> shift) as u8);
-    }
-  }
-  Some(out)
-}
-
-struct TeleagentTokenInfo {
-  account_name: String,
-  expires_at_ms: Option<u64>,
-}
-
-/// 解析 operationToken：整体可能是「前缀:JWT」形式（桌面端 cookie 原样），
-/// 从第一个 eyJ 起取 JWT；解 payload 拿账号名与 exp。
-fn parse_teleagent_token(raw: &str) -> Result<TeleagentTokenInfo, String> {
-  let token = raw.trim();
-  let jwt = match token.find("eyJ") {
-    Some(i) => &token[i..],
-    None => token,
-  };
-  let parts: Vec<&str> = jwt.split('.').collect();
-  if parts.len() != 3 {
-    return Err("token 格式不对：不是有效的 JWT，请确认粘贴的是完整的 operationToken".to_string());
-  }
-  let payload = base64url_decode(parts[1])
-    .ok_or_else(|| "token 格式不对：JWT 内容解码失败".to_string())?;
-  let value: serde_json::Value = serde_json::from_slice(&payload)
-    .map_err(|_| "token 格式不对：JWT 内容不是有效 JSON".to_string())?;
-  let account_name = ["accountName", "account_name", "name", "nickname", "sub"]
-    .iter()
-    .filter_map(|k| value.get(k).and_then(|v| v.as_str()))
-    .next()
-    .unwrap_or("")
-    .trim()
-    .to_string();
-  let expires_at_ms = value
-    .get("exp")
-    .and_then(|v| v.as_u64())
-    .map(|exp| exp.saturating_mul(1000));
-  Ok(TeleagentTokenInfo {
-    account_name,
-    expires_at_ms,
-  })
-}
-
-enum TeleagentPoints {
-  Ok {
-    claimed_today: bool,
-    total_points: u64,
-    claim_days: u64,
-  },
-  Expired,
-  Failed(String),
-}
-
 /// GLaDOS 系站点域名（会话按域名隔离）。
 const GLADOS_DOMAINS: &[&str] = &[
   "glados.cloud",
@@ -799,16 +665,6 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
       }
       return makeLoading();
     }
-    if (host === 'agent.teleai.com.cn') {
-      if (path.includes('teleagent-login')) {
-        return makeLoggedOut();
-      }
-      const rootEl = document.getElementById('root');
-      if (rootEl && rootEl.childElementCount > 0) {
-        return JSON.stringify({ auth: true, loggedOut: false, typed: '', email: '', avatar: '', quotaText: '', quotaPct: null, quotaDetail: null, sessionState: 'unknown', pendingHotkey });
-      }
-      return makeLoading();
-    }
     if (isExternalLoginHost) {
       if (/^\/(login|signin|signup|auth)\b/.test(path) || hasVisibleLoginInput()) {
         return makeLoggedOut();
@@ -1357,9 +1213,6 @@ impl SessionManager {
         uuid: acc.uuid.clone(),
       };
       acc.quota_stale = locked.quota_miss.get(&k).map(|n| *n >= 3).unwrap_or(false);
-      // TeleAgent 凭证只落盘，绝不下发界面层。
-      acc.teleagent_token = String::new();
-      acc.teleagent_device_id = String::new();
       // GLaDOS Cookie 同样只落盘。
       acc.gd_cookie = String::new();
       acc.session_state = locked
@@ -1431,14 +1284,6 @@ impl SessionManager {
             Some(d) if d > 0.0 => "剩余不足 1 天".to_string(),
             Some(_) => "已过期".to_string(),
             None => "状态待同步".to_string(),
-          },
-        }
-      } else if acc.provider_id == ProviderId::TeleAgent {
-        match acc.auth_state {
-          crate::storage::AuthState::LoggedOut => "token 已失效".to_string(),
-          _ => match acc.ta_total_points {
-            Some(p) => format!("积分 {p}"),
-            None => "积分待同步".to_string(),
           },
         }
       } else {
@@ -1651,7 +1496,7 @@ impl SessionManager {
   }
 
   /// 哪些服务商的视图值得保活：Muse 页面重、加载慢且会话探针依赖活视图；
-  /// TeleAgent / GLaDOS 控制台轻、状态数据走 API 刷新，离开前台即关、不进暖池。
+  /// GLaDOS 控制台轻、状态数据走 API 刷新，离开前台即关、不进暖池。
   #[cfg(desktop)]
   fn provider_warm_eligible(provider_id: ProviderId) -> bool {
     matches!(provider_id, ProviderId::Muse)
@@ -1721,7 +1566,7 @@ impl SessionManager {
       {
         let _ = next_seq;
         if !Self::provider_warm_eligible(old_slot.account_key.provider_id) {
-          // 不保活的服务商（TeleAgent / GLaDOS）：离开前台直接关视图，
+          // 不保活的服务商（GLaDOS）：离开前台直接关视图，
           // 状态靠 API 刷新，下次打开冷加载，不占暖池名额。
           if let Some(entry) = locked.warm_pool.remove(&old_slot.account_key) {
             Self::close_warm_entry(app, entry);
@@ -1959,14 +1804,6 @@ impl SessionManager {
         pending_detail: String::new(),
         view_error: false,
         sort_order: next_sort_order,
-        teleagent_token: String::new(),
-        teleagent_device_id: String::new(),
-        token_expires_at_ms: None,
-        ta_claimed_today: None,
-        ta_total_points: None,
-        ta_claim_days: None,
-        ta_points_synced_at_ms: None,
-        ta_points_error: String::new(),
         gd_cookie: String::new(),
         gd_domain: String::new(),
         gd_left_days: None,
@@ -2278,337 +2115,6 @@ impl SessionManager {
     Ok(Self::snapshot_from_locked(&locked))
   }
 
-  /// 添加 TeleAgent 账号：不走网页登录，直接保存 operationToken，
-  /// 别名与到期时间从 JWT 解出；随后切换到该账号（视图靠 cookie 注入免登录）。
-  pub async fn add_teleagent_account(
-    self: &Arc<Self>,
-    app: &AppHandle,
-    raw_token: &str,
-    raw_device_id: &str,
-  ) -> Result<ManagerSnapshot, String> {
-    let token = raw_token.trim().to_string();
-    let device_id = raw_device_id.trim().to_string();
-    if token.is_empty() {
-      return Err("请粘贴 operationToken".to_string());
-    }
-    let info = parse_teleagent_token(&token)?;
-    if let Some(exp) = info.expires_at_ms {
-      let now = now_ms();
-      if exp <= now {
-        let days = (now - exp) / 86_400_000;
-        return Err(format!(
-          "这个 token 已过期（{} 天前到期），请从 TeleAgent 客户端重新提取",
-          days.max(1)
-        ));
-      }
-    }
-    let provider_id = ProviderId::TeleAgent;
-    let (alias, auto_alias) = if info.account_name.is_empty() {
-      ("TeleAgent 账号".to_string(), true)
-    } else {
-      (info.account_name.clone(), true)
-    };
-
-    let created_key = {
-      let mut locked = self.inner.lock().await;
-      if !locked.conflicts.is_empty() {
-        return Err("请先处理 UUID 归属冲突后再新增账号".to_string());
-      }
-      if locked
-        .store
-        .accounts
-        .iter()
-        .any(|a| a.provider_id == provider_id && a.teleagent_token == token)
-      {
-        return Err("这个 token 已经添加过了".to_string());
-      }
-      let uuid = loop {
-        let candidate = Uuid::new_v4().hyphenated().to_string();
-        let used_in_accounts = locked.store.accounts.iter().any(|a| a.uuid == candidate);
-        let used_in_cleanup = locked.store.pending_cleanup.iter().any(|k| k.uuid == candidate);
-        if !used_in_accounts && !used_in_cleanup {
-          break candidate;
-        }
-      };
-      let next_sort_order = locked
-        .store
-        .accounts
-        .iter()
-        .map(|a| a.sort_order)
-        .max()
-        .unwrap_or(-1024)
-        + 1024;
-      locked.store.accounts.push(AccountRecord {
-        provider_id,
-        uuid: uuid.clone(),
-        alias,
-        created_at_ms: now_ms(),
-        auto_alias,
-        avatar_url: None,
-        quota_text: None,
-        quota_percent: None,
-        quota_detail: None,
-        auth_state: AuthState::Unknown,
-        quota_synced_at_ms: None,
-        quota_stale: false,
-        note: String::new(),
-        session_state: "unknown".to_string(),
-        pending_detail: String::new(),
-        view_error: false,
-        sort_order: next_sort_order,
-        teleagent_token: token,
-        teleagent_device_id: device_id,
-        token_expires_at_ms: info.expires_at_ms,
-        ta_claimed_today: None,
-        ta_total_points: None,
-        ta_claim_days: None,
-        ta_points_synced_at_ms: None,
-        ta_points_error: String::new(),
-        gd_cookie: String::new(),
-        gd_domain: String::new(),
-        gd_left_days: None,
-        gd_points: None,
-        gd_streak: None,
-        gd_synced_at_ms: None,
-        gd_error: String::new(),
-      });
-      save_store_atomic(&locked.store_path, &locked.store)?;
-      locked.selected_provider_id = provider_id;
-      AccountKey { provider_id, uuid }
-    };
-
-    let snap = self.switch_account_internal(app, created_key, false).await?;
-    let mgr = Arc::clone(self);
-    let app2 = app.clone();
-    tauri::async_runtime::spawn(async move {
-      mgr.sync_teleagent_points(&app2, true).await;
-    });
-    Ok(snap)
-  }
-
-  /// 更新 TeleAgent 账号的 token（过期换新）：校验后落盘，并让已有视图
-  /// 立即种新 cookie 并刷新；最后重新拉一次积分。
-  pub async fn update_teleagent_token(
-    self: &Arc<Self>,
-    app: &AppHandle,
-    raw_uuid: &str,
-    raw_token: &str,
-    raw_device_id: &str,
-  ) -> Result<ManagerSnapshot, String> {
-    let token = raw_token.trim().to_string();
-    let device_id = raw_device_id.trim().to_string();
-    if token.is_empty() {
-      return Err("请粘贴 operationToken".to_string());
-    }
-    let info = parse_teleagent_token(&token)?;
-    if let Some(exp) = info.expires_at_ms {
-      let now = now_ms();
-      if exp <= now {
-        let days = (now - exp) / 86_400_000;
-        return Err(format!(
-          "这个 token 已过期（{} 天前到期），请从 TeleAgent 客户端重新提取",
-          days.max(1)
-        ));
-      }
-    }
-    let key = AccountKey {
-      provider_id: ProviderId::TeleAgent,
-      uuid: raw_uuid.to_string(),
-    };
-    let warm_label = {
-      let mut locked = self.inner.lock().await;
-      let Some(acc) = locked
-        .store
-        .accounts
-        .iter_mut()
-        .find(|a| a.provider_id == ProviderId::TeleAgent && a.uuid == raw_uuid)
-      else {
-        return Err("账号不存在".to_string());
-      };
-      acc.teleagent_token = token.clone();
-      if !device_id.is_empty() {
-        acc.teleagent_device_id = device_id;
-      }
-      acc.token_expires_at_ms = info.expires_at_ms;
-      acc.ta_points_error = String::new();
-      if acc.auto_alias && !info.account_name.is_empty() {
-        acc.alias = info.account_name.clone();
-      }
-      save_store_atomic(&locked.store_path, &locked.store)?;
-      locked
-        .warm_pool
-        .get(&key)
-        .map(|e| e.webview_label.clone())
-    };
-    if let Some(label) = warm_label {
-      if let Some(wv) = app.get_webview(&label) {
-        let _ = wv.eval(&teleagent_cookie_reset_script(&token));
-      }
-    }
-    let snap = {
-      let locked = self.inner.lock().await;
-      Self::snapshot_from_locked(&locked)
-    };
-    self.emit_snapshot(app, &snap);
-    let mgr = Arc::clone(self);
-    let app2 = app.clone();
-    tauri::async_runtime::spawn(async move {
-      mgr.sync_teleagent_points(&app2, true).await;
-    });
-    Ok(snap)
-  }
-
-  /// 拉单个 TeleAgent 账号的每日任务状态（积分展示口径）。
-  async fn fetch_teleagent_points(&self, token: &str, device_id: &str) -> TeleagentPoints {
-    let proxy = self.effective_proxy_url().await;
-    let mut builder = reqwest::Client::builder()
-      .user_agent(format!(
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) TeleAgent/{TELEAGENT_APP_VERSION}"
-      ))
-      .connect_timeout(std::time::Duration::from_secs(10))
-      .timeout(std::time::Duration::from_secs(15));
-    if let Some(p) = &proxy {
-      if let Ok(px) = reqwest::Proxy::all(p.as_str()) {
-        builder = builder.proxy(px);
-      }
-    }
-    let client = match builder.build() {
-      Ok(c) => c,
-      Err(e) => return TeleagentPoints::Failed(format!("网络客户端创建失败: {e}")),
-    };
-    let nonce = Uuid::new_v4().to_string();
-    let ts = (now_ms() / 1000).to_string();
-    let resp = client
-      .get(format!(
-        "{TELEAGENT_API_BASE}/user/portal/companyStore/v2/checkDayTask"
-      ))
-      .header("X-Token", token)
-      .header("X-SuperAgent-Device-Id", device_id)
-      .header("X-Timestamp", ts)
-      .header("X-Nonce", nonce)
-      .header("X-App-Version", TELEAGENT_APP_VERSION)
-      .header("X-OS-Type", "macos")
-      .header("X-Channel-Id", "")
-      .send()
-      .await;
-    let resp = match resp {
-      Ok(r) => r,
-      Err(e) => return TeleagentPoints::Failed(format!("积分查询失败: {e}")),
-    };
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    let value: serde_json::Value = match serde_json::from_str(&body) {
-      Ok(v) => v,
-      Err(_) => {
-        if status.as_u16() == 401 {
-          return TeleagentPoints::Expired;
-        }
-        return TeleagentPoints::Failed(format!("积分查询失败（HTTP {status}）"));
-      }
-    };
-    let code = value.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
-    if code == 401 {
-      return TeleagentPoints::Expired;
-    }
-    if code != 200 {
-      let msg = value
-        .get("msg")
-        .and_then(|v| v.as_str())
-        .unwrap_or("未知错误");
-      return TeleagentPoints::Failed(format!("积分查询失败：{msg}"));
-    }
-    let dt = value.get("data").and_then(|d| d.get("daily_task"));
-    match dt {
-      Some(dt) => TeleagentPoints::Ok {
-        claimed_today: dt
-          .get("claimed_today")
-          .and_then(|v| v.as_bool())
-          .unwrap_or(false),
-        total_points: dt
-          .get("total_claimed_points")
-          .and_then(|v| v.as_u64())
-          .unwrap_or(0),
-        claim_days: dt
-          .get("total_claim_days")
-          .and_then(|v| v.as_u64())
-          .unwrap_or(0),
-      },
-      None => TeleagentPoints::Failed("积分数据格式异常".to_string()),
-    }
-  }
-
-  /// 批量同步 TeleAgent 账号积分：非强制时只拉 10 分钟未更新的账号。
-  pub async fn sync_teleagent_points(self: &Arc<Self>, app: &AppHandle, force: bool) {
-    let now = now_ms();
-    let targets: Vec<(AccountKey, String, String)> = {
-      let locked = self.inner.lock().await;
-      locked
-        .store
-        .accounts
-        .iter()
-        .filter(|a| a.provider_id == ProviderId::TeleAgent && !a.teleagent_token.is_empty())
-        .filter(|a| {
-          force
-            || a.ta_points_synced_at_ms
-              .map(|t| now.saturating_sub(t) > 600_000)
-              .unwrap_or(true)
-        })
-        .map(|a| {
-          (
-            AccountKey {
-              provider_id: a.provider_id,
-              uuid: a.uuid.clone(),
-            },
-            a.teleagent_token.clone(),
-            a.teleagent_device_id.clone(),
-          )
-        })
-        .collect()
-    };
-    if targets.is_empty() {
-      return;
-    }
-    let mut results: Vec<(AccountKey, TeleagentPoints)> = Vec::new();
-    for (key, token, device_id) in &targets {
-      let outcome = self.fetch_teleagent_points(token, device_id).await;
-      results.push((key.clone(), outcome));
-    }
-    let snap = {
-      let mut locked = self.inner.lock().await;
-      for (key, outcome) in &results {
-        if let Some(acc) = locked
-          .store
-          .accounts
-          .iter_mut()
-          .find(|a| a.provider_id == key.provider_id && a.uuid == key.uuid)
-        {
-          acc.ta_points_synced_at_ms = Some(now_ms());
-          match outcome {
-            TeleagentPoints::Ok {
-              claimed_today,
-              total_points,
-              claim_days,
-            } => {
-              acc.ta_claimed_today = Some(*claimed_today);
-              acc.ta_total_points = Some(*total_points);
-              acc.ta_claim_days = Some(*claim_days);
-              acc.ta_points_error = String::new();
-            }
-            TeleagentPoints::Expired => {
-              acc.ta_points_error = "token 已失效".to_string();
-            }
-            TeleagentPoints::Failed(msg) => {
-              acc.ta_points_error = msg.clone();
-            }
-          }
-        }
-      }
-      let _ = save_store_atomic(&locked.store_path, &locked.store);
-      Self::snapshot_from_locked(&locked)
-    };
-    self.emit_snapshot(app, &snap);
-  }
-
   /// 拉单个 GLaDOS 账号的状态（剩余天数 + 积分/连签）。
   async fn fetch_glados_status(&self, domain: &str, cookie: &str) -> GladosFetch {
     let proxy = self.effective_proxy_url().await;
@@ -2850,14 +2356,6 @@ impl SessionManager {
         pending_detail: String::new(),
         view_error: false,
         sort_order: next_sort_order,
-        teleagent_token: String::new(),
-        teleagent_device_id: String::new(),
-        token_expires_at_ms: None,
-        ta_claimed_today: None,
-        ta_total_points: None,
-        ta_claim_days: None,
-        ta_points_synced_at_ms: None,
-        ta_points_error: String::new(),
         gd_cookie: cookie,
         gd_domain: domain,
         gd_left_days: Some(status.left_days),
@@ -3285,14 +2783,6 @@ impl SessionManager {
     }
     self.last_sync_timestamp.store(now, Ordering::SeqCst);
 
-    // TeleAgent 积分走 API 拉取（与网页视图探针解耦），异步执行不阻塞 Muse 同步。
-    {
-      let mgr_ta = Arc::clone(self);
-      let app_ta = app.clone();
-      tauri::async_runtime::spawn(async move {
-        mgr_ta.sync_teleagent_points(&app_ta, force).await;
-      });
-    }
     {
       let mgr_gd = Arc::clone(self);
       let app_gd = app.clone();
@@ -3458,7 +2948,6 @@ impl SessionManager {
         allow_blank,
         alive_flag,
         proxy_url,
-        account.teleagent_token.clone(),
         account.gd_cookie.clone(),
         account.gd_domain.clone(),
       );
@@ -3765,16 +3254,9 @@ impl SessionManager {
     allow_blank: Arc<AtomicBool>,
     alive_flag: Arc<AtomicBool>,
     proxy_url: Option<Url>,
-    teleagent_token: String,
     gd_cookie: String,
     gd_domain: String,
   ) -> tauri::webview::WebviewBuilder<tauri::Wry> {
-    // TeleAgent 视图：在页面脚本运行前种下 operationToken cookie（免登录）。
-    let ta_init_script = if key.provider_id == ProviderId::TeleAgent {
-      teleagent_cookie_script(&teleagent_token)
-    } else {
-      "void 0;".to_string()
-    };
     // GLaDOS 视图：同样在页面脚本运行前种下整行 Cookie。
     let gd_init_script = if key.provider_id == ProviderId::Glados {
       glados_cookie_script(&gd_cookie, &gd_domain)
@@ -3809,7 +3291,6 @@ impl SessionManager {
     .focused(false)
     .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
     .initialization_script(LOGIN_CAPTURE_INIT_JS)
-    .initialization_script(&ta_init_script)
     .initialization_script(&gd_init_script)
     .on_navigation(move |url| {
       if !alive_nav.load(Ordering::SeqCst) {
@@ -4069,7 +3550,6 @@ impl SessionManager {
       allow_blank,
       Arc::clone(&alive_flag),
       proxy_url,
-      account.teleagent_token.clone(),
       account.gd_cookie.clone(),
       account.gd_domain.clone(),
     );
@@ -4401,7 +3881,6 @@ impl SessionManager {
       allow_blank,
       Arc::clone(&alive_flag),
       proxy_url,
-      account.teleagent_token.clone(),
       account.gd_cookie.clone(),
       account.gd_domain.clone(),
     );
@@ -4881,7 +4360,6 @@ impl SessionManager {
       allow_blank,
       alive_flag,
       proxy_url,
-      account.teleagent_token.clone(),
       account.gd_cookie.clone(),
       account.gd_domain.clone(),
     );
@@ -5531,7 +5009,7 @@ impl SessionManager {
             !c.is_empty() && c != "额度充足" && c != "正在同步额度…"
           })
           .unwrap_or(false);
-      if key.provider_id != ProviderId::TeleAgent && key.provider_id != ProviderId::Glados {
+      if key.provider_id != ProviderId::Glados {
         if got_quota {
           locked.quota_miss.remove(&key);
         } else {

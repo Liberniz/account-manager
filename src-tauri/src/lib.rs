@@ -81,15 +81,6 @@ async fn reorder_accounts(
   mgr.reorder_accounts(&provider_id, ordered_uuids).await
 }
 
-#[tauri::command]
-async fn add_teleagent_account(
-  app: AppHandle,
-  mgr: State<'_, Arc<SessionManager>>,
-  token: String,
-  device_id: String,
-) -> Result<ManagerSnapshot, String> {
-  mgr.add_teleagent_account(&app, &token, &device_id).await
-}
 
 #[tauri::command]
 async fn add_glados_account(
@@ -115,16 +106,6 @@ async fn update_glados_cookie(
     .await
 }
 
-#[tauri::command]
-async fn update_teleagent_token(
-  app: AppHandle,
-  mgr: State<'_, Arc<SessionManager>>,
-  uuid: String,
-  token: String,
-  device_id: String,
-) -> Result<ManagerSnapshot, String> {
-  mgr.update_teleagent_token(&app, &uuid, &token, &device_id).await
-}
 
 #[tauri::command]
 async fn remove_account(
@@ -427,8 +408,6 @@ pub fn run() {
       rename_account,
       set_account_note,
       reorder_accounts,
-      add_teleagent_account,
-      update_teleagent_token,
       add_glados_account,
       update_glados_cookie,
       retry_account_view,

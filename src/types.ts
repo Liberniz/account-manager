@@ -1,4 +1,4 @@
-export type ProviderId = "muse" | "teleagent" | "glados";
+export type ProviderId = "muse" | "glados" | "cue";
 export type AuthState = "unknown" | "authenticated" | "logged_out";
 
 export interface AccountKey {
@@ -47,12 +47,6 @@ export interface AccountRecord {
   pendingDetail: string;
   viewError: boolean;
   sortOrder: number;
-  tokenExpiresAtMs: number | null;
-  taClaimedToday: boolean | null;
-  taTotalPoints: number | null;
-  taClaimDays: number | null;
-  taPointsSyncedAtMs: number | null;
-  taPointsError: string;
   gdDomain: string;
   gdLeftDays: number | null;
   gdPoints: number | null;

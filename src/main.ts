@@ -18,8 +18,6 @@ import type {
 type ModalMode =
   | { kind: "none" }
   | { kind: "add"; providerId: ProviderId; draft: string }
-  | { kind: "add-teleagent"; tokenDraft: string; deviceDraft: string }
-  | { kind: "update-teleagent"; account: AccountRecord; tokenDraft: string; deviceDraft: string }
   | { kind: "add-glados"; domainDraft: string; cookieDraft: string }
   | { kind: "update-glados"; account: AccountRecord; cookieDraft: string }
   | { kind: "rename"; account: AccountRecord; draft: string; noteDraft: string }
@@ -30,7 +28,7 @@ type ModalMode =
 
 const PROVIDER_LOGOS: Record<ProviderId, { src: string; fullBleed: boolean }> = {
   muse: { src: "/logos/muse.png", fullBleed: true },
-  teleagent: { src: "/logos/teleagent.svg", fullBleed: true },
+  cue: { src: "/logos/cue.svg", fullBleed: true },
   glados: { src: "/logos/glados.svg", fullBleed: true },
 };
 
@@ -86,7 +84,7 @@ const updateState: {
 
 const scrollOffsets: Record<ProviderId, number> = {
   muse: 0,
-  teleagent: 0,
+  cue: 0,
   glados: 0,
 };
 
@@ -644,47 +642,6 @@ function renderModal(provider: ProviderInfo): string {
       </div>
     `;
   }
-  if (modal.kind === "add-teleagent") {
-    return `
-      <div class="inline-modal" role="dialog" aria-modal="true">
-        <div class="modal-card">
-          <div class="modal-title">新增 TeleAgent 账号</div>
-          <div class="modal-desc">不走网页登录：粘贴从桌面客户端提取的 operationToken，叠号会把它种入该账号的隔离视图、直接进入登录态。别名与到期时间自动从 token 解析，token 只存本机。</div>
-          <textarea id="modal-token-input" class="modal-input modal-textarea" rows="4" placeholder="粘贴 operationToken（整段粘贴即可）">${escapeHtml(modal.tokenDraft)}</textarea>
-          <div class="modal-desc" style="margin-top:14px;">设备 ID（选填）：填了才能在账号旁显示积分与签到状态，不填不影响网页端使用。</div>
-          <input id="modal-device-input" class="modal-input" maxlength="80" placeholder="X-SuperAgent-Device-Id（可留空）" value="${escapeHtml(modal.deviceDraft)}" />
-          <div class="modal-footer">
-            <button id="modal-cancel-btn" class="btn" type="button">取消</button>
-            <button id="modal-confirm-btn" class="btn primary" type="button">添加并打开</button>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-  if (modal.kind === "update-teleagent") {
-    const exp = modal.account.tokenExpiresAtMs;
-    const expText =
-      typeof exp === "number"
-        ? exp <= Date.now()
-          ? `当前 token 已过期（${fmtDateMs(exp)} 到期）`
-          : `当前 token ${fmtDateMs(exp)} 到期`
-        : "当前 token 到期时间未知";
-    return `
-      <div class="inline-modal" role="dialog" aria-modal="true">
-        <div class="modal-card">
-          <div class="modal-title">更新 token · ${escapeHtml(modal.account.alias)}</div>
-          <div class="modal-desc">${expText}。粘贴新的 operationToken 后，该账号视图会自动刷新为新登录态。</div>
-          <textarea id="modal-token-input" class="modal-input modal-textarea" rows="4" placeholder="粘贴新的 operationToken（整段粘贴即可）">${escapeHtml(modal.tokenDraft)}</textarea>
-          <div class="modal-desc" style="margin-top:14px;">设备 ID（选填）：留空则保留原值，填了才能显示积分与签到状态。</div>
-          <input id="modal-device-input" class="modal-input" maxlength="80" placeholder="X-SuperAgent-Device-Id（可留空）" value="${escapeHtml(modal.deviceDraft)}" />
-          <div class="modal-footer">
-            <button id="modal-cancel-btn" class="btn" type="button">取消</button>
-            <button id="modal-confirm-btn" class="btn primary" type="button">保存并刷新</button>
-          </div>
-        </div>
-      </div>
-    `;
-  }
   if (modal.kind === "add-glados") {
     const currentDomain = modal.domainDraft;
     const domainOptions = GLADOS_DOMAINS.map(
@@ -741,7 +698,7 @@ function renderModal(provider: ProviderInfo): string {
             <input id="modal-proxy-follow" type="checkbox" ${modal.followSystem ? "checked" : ""} />
             <span>跟随系统代理：自动读取 macOS 系统代理设置（如 Clash / Surge 开启的系统代理），勾选后忽略上方手动地址</span>
           </label>
-          <div class="modal-desc" style="margin-top:14px;">保活视图上限（仅 Muse）：后台保持就绪的账号视图数量，可填 1-32 任意数值；留空 = 默认 6，填 0 = 不限。越多切换越快、内存占用越高；闲置超过 30 分钟的保活视图会自动回收，冷账号的额度会通过临时视图轮流刷新，不占用保活名额。TeleAgent / GLaDOS 不保活，离开即关、数据走接口刷新。</div>
+          <div class="modal-desc" style="margin-top:14px;">保活视图上限（仅 Muse）：后台保持就绪的账号视图数量，可填 1-32 任意数值；留空 = 默认 6，填 0 = 不限。越多切换越快、内存占用越高；闲置超过 30 分钟的保活视图会自动回收，冷账号的额度会通过临时视图轮流刷新，不占用保活名额。GLaDOS / Cue 不保活，离开即关、冷加载打开。</div>
           <input id="modal-warm-limit" class="modal-input" type="number" min="0" max="32" step="1" placeholder="默认 6" value="${escapeHtml(modal.warmLimit)}" />
           ${snapshot ? `<div class="modal-desc" style="margin-top:10px;">当前保活视图：${snapshot.warmViewCount} 个（上限 ${snapshot.warmViewLimit === null ? "默认 6" : snapshot.warmViewLimit === 0 ? "不限" : snapshot.warmViewLimit}）</div>` : ""}
           <div class="modal-footer">
@@ -900,7 +857,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
       <div class="empty-list">
         <div class="empty-icon-circle">${ICON_USER_PLUS}</div>
         <div>暂无 ${escapeHtml(provider.shortName)} 账号</div>
-        <div>${provider.id === "teleagent" ? "点击右上角「+ 新增」粘贴 operationToken 添加" : provider.id === "glados" ? "点击右上角「+ 新增」粘贴 Cookie 添加" : "点击右上角「+ 新增」创建独立登录环境"}</div>
+        <div>${provider.id === "glados" ? "点击右上角「+ 新增」粘贴 Cookie 添加" : "点击右上角「+ 新增」创建独立登录环境"}</div>
       </div>
     `;
   } else {
@@ -910,7 +867,6 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
         const active = !switching && isSameKey(state.activeAccount, acc);
         const avatarText = computeAvatarText(acc);
         const isLoggedOut = acc.authState === "logged_out";
-        const isTeleagent = acc.providerId === "teleagent";
         const isGlados = acc.providerId === "glados";
         const hasDetail = !isLoggedOut && Boolean(acc.quotaDetail);
 
@@ -938,18 +894,12 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
                 ? `<span class="session-badge done">已完成</span>`
                 : "";
 
-        const tokenExpired =
-          isTeleagent &&
-          typeof acc.tokenExpiresAtMs === "number" &&
-          acc.tokenExpiresAtMs <= Date.now();
         const gladosExpired =
           isGlados &&
           !isLoggedOut &&
           typeof acc.gdLeftDays === "number" &&
           acc.gdLeftDays <= 0;
-        const alertBadgeHtml = tokenExpired
-          ? `<span class="quota-warning-badge critical">token 已失效</span>`
-          : gladosExpired
+        const alertBadgeHtml = gladosExpired
             ? `<span class="quota-warning-badge critical">已过期</span>`
           : isLoggedOut
             ? `<span class="auth-status-badge">未登录</span>`
@@ -1004,37 +954,6 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
               pointsLine = "状态同步中…";
             }
             compactSubHtml = `<div class="${daysClass}"><span class="quota-label-text">${escapeHtml(daysLine)}</span></div><div class="${pointsClass}"><span class="quota-label-text">${escapeHtml(pointsLine)}</span></div>`;
-          }
-        } else if (isTeleagent) {
-          if (isLoggedOut) {
-            compactSubHtml = `<div class="account-sub auth-logged-out"><span class="auth-dot-inline"></span><span class="quota-label-text">token 已失效，点行尾钥匙按钮更新</span></div>`;
-          } else {
-            const exp = acc.tokenExpiresAtMs;
-            let expLine: string;
-            if (typeof exp === "number") {
-              expLine =
-                exp <= Date.now()
-                  ? `token 已过期 · ${fmtDateMs(exp)} 到期`
-                  : `token 剩 ${Math.ceil((exp - Date.now()) / 86_400_000)} 天 · ${fmtDateMs(exp)} 到期`;
-            } else {
-              expLine = "token 到期时间未知";
-            }
-            const expClass =
-              typeof exp === "number" &&
-              (exp <= Date.now() || (exp - Date.now()) / 86_400_000 <= 5)
-                ? "account-sub quota-low"
-                : "account-sub";
-            let pointsLine: string;
-            let pointsClass = "account-sub";
-            if (acc.taPointsError) {
-              pointsLine = acc.taPointsError;
-              pointsClass = "account-sub quota-empty";
-            } else if (typeof acc.taTotalPoints === "number") {
-              pointsLine = `今日${acc.taClaimedToday ? "已签" : "未签"} · 累计 ${acc.taTotalPoints.toLocaleString()} 积分 · 连签 ${acc.taClaimDays ?? 0} 天`;
-            } else {
-              pointsLine = "积分同步中…";
-            }
-            compactSubHtml = `<div class="${expClass}"><span class="quota-label-text">${escapeHtml(expLine)}</span></div><div class="${pointsClass}"><span class="quota-label-text">${escapeHtml(pointsLine)}</span></div>`;
           }
         } else if (isLoggedOut) {
           const loginHint = active
@@ -1109,7 +1028,6 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
               </div>
               <div class="row-ops">
                 ${acc.viewError && !isLoggedOut ? `<button class="action-icon-btn" data-retry-uuid="${escapeHtml(acc.uuid)}" title="视图预热失败，点此重试" type="button">${ICON_REFRESH}</button>` : ""}
-                ${isTeleagent ? `<button class="action-icon-btn" data-update-token-uuid="${escapeHtml(acc.uuid)}" title="更新 operationToken" type="button">${ICON_KEY}</button>` : ""}
                 ${isGlados ? `<button class="action-icon-btn" data-update-cookie-uuid="${escapeHtml(acc.uuid)}" title="更新 Cookie" type="button">${ICON_KEY}</button>` : ""}
                 <button class="action-icon-btn" data-browser-uuid="${escapeHtml(acc.uuid)}" title="在默认浏览器打开官网（独立会话，作备用入口）" type="button">${ICON_EXTERNAL}</button>
                 <button class="action-icon-btn" data-rename-uuid="${escapeHtml(acc.uuid)}" title="修改备注" type="button">${ICON_EDIT}</button>
@@ -1540,9 +1458,7 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
   });
 
   const openAddModal = async () => {
-    if (provider.id === "teleagent") {
-      await setModal({ kind: "add-teleagent", tokenDraft: "", deviceDraft: "" });
-    } else if (provider.id === "glados") {
+    if (provider.id === "glados") {
       await setModal({ kind: "add-glados", domainDraft: "glados.cloud", cookieDraft: "" });
     } else {
       await setModal({ kind: "add", providerId: provider.id, draft: "" });
@@ -1842,22 +1758,6 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     });
   });
 
-  document.querySelectorAll<HTMLElement>("[data-update-token-uuid]").forEach((btn) => {
-    btn.addEventListener("click", async (ev) => {
-      ev.stopPropagation();
-      const uuid = btn.dataset.updateTokenUuid;
-      const acc = state.accounts.find((a) => a.providerId === provider.id && a.uuid === uuid);
-      if (acc) {
-        await setModal({
-          kind: "update-teleagent",
-          account: acc,
-          tokenDraft: "",
-          deviceDraft: "",
-        });
-      }
-    });
-  });
-
   document.querySelectorAll<HTMLElement>("[data-update-cookie-uuid]").forEach((btn) => {
     btn.addEventListener("click", async (ev) => {
       ev.stopPropagation();
@@ -1949,13 +1849,6 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     }
   });
 
-  const tokenInput = document.querySelector<HTMLTextAreaElement>("#modal-token-input");
-  tokenInput?.addEventListener("input", () => {
-    if (modal.kind === "add-teleagent" || modal.kind === "update-teleagent") {
-      modal.tokenDraft = tokenInput.value;
-    }
-  });
-
   const cookieInput = document.querySelector<HTMLTextAreaElement>("#modal-cookie-input");
   cookieInput?.addEventListener("input", () => {
     if (modal.kind === "add-glados" || modal.kind === "update-glados") {
@@ -1967,13 +1860,6 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
   domainSelect?.addEventListener("change", () => {
     if (modal.kind === "add-glados") {
       modal.domainDraft = domainSelect.value;
-    }
-  });
-
-  const deviceInput = document.querySelector<HTMLInputElement>("#modal-device-input");
-  deviceInput?.addEventListener("input", () => {
-    if (modal.kind === "add-teleagent" || modal.kind === "update-teleagent") {
-      modal.deviceDraft = deviceInput.value;
     }
   });
 
@@ -2025,19 +1911,6 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
           note,
         });
       }
-    } else if (currentModal.kind === "add-teleagent") {
-      const token = currentModal.tokenDraft.trim();
-      if (!token) return;
-      const deviceId = currentModal.deviceDraft.trim();
-      await setModal({ kind: "none" });
-      await callCommand("add_teleagent_account", { token, deviceId });
-    } else if (currentModal.kind === "update-teleagent") {
-      const token = currentModal.tokenDraft.trim();
-      if (!token) return;
-      const deviceId = currentModal.deviceDraft.trim();
-      const uuid = currentModal.account.uuid;
-      await setModal({ kind: "none" });
-      await callCommand("update_teleagent_token", { uuid, token, deviceId });
     } else if (currentModal.kind === "add-glados") {
       const cookie = currentModal.cookieDraft.trim();
       if (!cookie) return;

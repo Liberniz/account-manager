@@ -18,8 +18,6 @@
     "allow-rename-account",
     "allow-set-account-note",
     "allow-reorder-accounts",
-    "allow-add-teleagent-account",
-    "allow-update-teleagent-token",
     "allow-add-glados-account",
     "allow-update-glados-cookie",
     "allow-retry-account-view",

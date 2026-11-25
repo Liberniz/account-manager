@@ -85,30 +85,6 @@ pub struct AccountRecord {
   /// 手动排序值（拖拽排序）：越小越靠前，快照/托盘/列表都按它排。
   #[serde(default)]
   pub sort_order: i64,
-  /// TeleAgent operationToken（登录凭证，仅落盘；快照副本恒为空，不下发界面）。
-  #[serde(default)]
-  pub teleagent_token: String,
-  /// TeleAgent 设备 ID（积分接口用，可为空；同样不进快照）。
-  #[serde(default)]
-  pub teleagent_device_id: String,
-  /// TeleAgent token 到期时间（从 JWT exp 解出，毫秒）。
-  #[serde(default)]
-  pub token_expires_at_ms: Option<u64>,
-  /// TeleAgent 积分状态（checkDayTask 接口拉取）：今日是否已签。
-  #[serde(default)]
-  pub ta_claimed_today: Option<bool>,
-  /// TeleAgent 累计已领积分（签到任务口径）。
-  #[serde(default)]
-  pub ta_total_points: Option<u64>,
-  /// TeleAgent 累计签到天数。
-  #[serde(default)]
-  pub ta_claim_days: Option<u64>,
-  /// TeleAgent 积分拉取时间（毫秒）。
-  #[serde(default)]
-  pub ta_points_synced_at_ms: Option<u64>,
-  /// TeleAgent 积分拉取失败原因（如「token 已失效」），空串表示无错误。
-  #[serde(default)]
-  pub ta_points_error: String,
   /// GLaDOS 整行 Cookie（登录凭证，仅落盘；快照副本恒为空，不下发界面）。
   #[serde(default)]
   pub gd_cookie: String,
@@ -399,44 +375,6 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
           .or_else(|| item_obj.get("sort_order"))
           .and_then(|v| v.as_i64())
           .unwrap_or(0),
-        teleagent_token: item_obj
-          .get("teleagentToken")
-          .or_else(|| item_obj.get("teleagent_token"))
-          .and_then(|v| v.as_str())
-          .unwrap_or("")
-          .to_string(),
-        teleagent_device_id: item_obj
-          .get("teleagentDeviceId")
-          .or_else(|| item_obj.get("teleagent_device_id"))
-          .and_then(|v| v.as_str())
-          .unwrap_or("")
-          .to_string(),
-        token_expires_at_ms: item_obj
-          .get("tokenExpiresAtMs")
-          .or_else(|| item_obj.get("token_expires_at_ms"))
-          .and_then(|v| v.as_u64()),
-        ta_claimed_today: item_obj
-          .get("taClaimedToday")
-          .or_else(|| item_obj.get("ta_claimed_today"))
-          .and_then(|v| v.as_bool()),
-        ta_total_points: item_obj
-          .get("taTotalPoints")
-          .or_else(|| item_obj.get("ta_total_points"))
-          .and_then(|v| v.as_u64()),
-        ta_claim_days: item_obj
-          .get("taClaimDays")
-          .or_else(|| item_obj.get("ta_claim_days"))
-          .and_then(|v| v.as_u64()),
-        ta_points_synced_at_ms: item_obj
-          .get("taPointsSyncedAtMs")
-          .or_else(|| item_obj.get("ta_points_synced_at_ms"))
-          .and_then(|v| v.as_u64()),
-        ta_points_error: item_obj
-          .get("taPointsError")
-          .or_else(|| item_obj.get("ta_points_error"))
-          .and_then(|v| v.as_str())
-          .unwrap_or("")
-          .to_string(),
         gd_cookie: item_obj
           .get("gdCookie")
           .or_else(|| item_obj.get("gd_cookie"))
