@@ -29,8 +29,11 @@ async fn add_account(
   mgr: State<'_, Arc<SessionManager>>,
   provider_id: String,
   alias: String,
+  import_cookie: Option<String>,
 ) -> Result<ManagerSnapshot, String> {
-  mgr.add_account(&app, &provider_id, &alias).await
+  mgr
+    .add_account(&app, &provider_id, &alias, import_cookie.as_deref().unwrap_or(""))
+    .await
 }
 
 #[tauri::command]
@@ -106,6 +109,82 @@ async fn update_glados_cookie(
     .await
 }
 
+
+#[tauri::command]
+async fn add_custom_site(
+  mgr: State<'_, Arc<SessionManager>>,
+  name: String,
+  entry_url: String,
+) -> Result<ManagerSnapshot, String> {
+  mgr.add_custom_site(name, entry_url).await
+}
+
+#[tauri::command]
+async fn remove_custom_site(
+  mgr: State<'_, Arc<SessionManager>>,
+  def_id: String,
+) -> Result<ManagerSnapshot, String> {
+  mgr.remove_custom_site(def_id).await
+}
+
+#[tauri::command]
+async fn get_group_data(
+  mgr: State<'_, Arc<SessionManager>>,
+) -> Result<crate::session_manager::GroupData, String> {
+  Ok(mgr.get_group_data().await)
+}
+
+#[tauri::command]
+async fn create_group(
+  mgr: State<'_, Arc<SessionManager>>,
+  name: String,
+) -> Result<crate::session_manager::GroupData, String> {
+  mgr.create_group(name).await
+}
+
+#[tauri::command]
+async fn save_group(
+  mgr: State<'_, Arc<SessionManager>>,
+  input: crate::session_manager::GroupSaveInput,
+) -> Result<crate::session_manager::GroupData, String> {
+  mgr.save_group(input).await
+}
+
+#[tauri::command]
+async fn delete_group(
+  mgr: State<'_, Arc<SessionManager>>,
+  group_id: String,
+) -> Result<crate::session_manager::GroupData, String> {
+  mgr.delete_group(group_id).await
+}
+
+#[tauri::command]
+async fn send_group_message(
+  app: AppHandle,
+  mgr: State<'_, Arc<SessionManager>>,
+  group_id: String,
+  text: String,
+) -> Result<crate::session_manager::GroupData, String> {
+  mgr.send_group_message(&app, group_id, text).await
+}
+
+#[tauri::command]
+async fn set_auto_approve(
+  mgr: State<'_, Arc<SessionManager>>,
+  enabled: bool,
+) -> Result<ManagerSnapshot, String> {
+  mgr.set_auto_approve(enabled).await
+}
+
+#[tauri::command]
+async fn reset_account_session(
+  app: AppHandle,
+  mgr: State<'_, Arc<SessionManager>>,
+  provider_id: String,
+  uuid: String,
+) -> Result<ManagerSnapshot, String> {
+  mgr.reset_account_session(&app, &provider_id, &uuid).await
+}
 
 #[tauri::command]
 async fn remove_account(
@@ -413,6 +492,15 @@ pub fn run() {
       retry_account_view,
       refresh_all_quotas,
       remove_account,
+      reset_account_session,
+      set_auto_approve,
+      get_group_data,
+      create_group,
+      save_group,
+      delete_group,
+      send_group_message,
+      add_custom_site,
+      remove_custom_site,
       switch_account,
       set_modal_active,
       open_official_site,

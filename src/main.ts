@@ -12,18 +12,22 @@ import type {
   UpdateCheckResult,
   UpdateProgressEvent,
   GlobalChatHit,
+  GroupData,
+  ChatGroupView,
   GlobalSearchResult,
 } from "./types";
 
 type ModalMode =
   | { kind: "none" }
-  | { kind: "add"; providerId: ProviderId; draft: string }
+  | { kind: "add"; providerId: ProviderId; draft: string; cookieDraft: string }
   | { kind: "add-glados"; domainDraft: string; cookieDraft: string }
   | { kind: "update-glados"; account: AccountRecord; cookieDraft: string }
   | { kind: "rename"; account: AccountRecord; draft: string; noteDraft: string }
   | { kind: "remove"; account: AccountRecord }
-  | { kind: "proxy"; draft: string; warmLimit: string; followSystem: boolean }
+  | { kind: "proxy"; draft: string; warmLimit: string; followSystem: boolean; autoApprove: boolean }
   | { kind: "notify"; status: string; testNote: string }
+  | { kind: "add-site"; nameDraft: string; urlDraft: string }
+  | { kind: "remove-site"; defId: string; name: string }
   | { kind: "update" };
 
 const PROVIDER_LOGOS: Record<ProviderId, { src: string; fullBleed: boolean }> = {
@@ -50,6 +54,10 @@ const ICON_PROXY = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" 
 const ICON_BELL = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>`;
 
 let snapshot: ManagerSnapshot | null = null;
+let groupData: GroupData | null = null;
+let groupPanelOpen = false;
+let currentGroupId: string | null = null;
+let groupPollTimer: number | null = null;
 let modal: ModalMode = { kind: "none" };
 let optimisticSwitching: AccountKey | null = null;
 let accountSearchQuery = "";
@@ -103,8 +111,12 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
-function renderProviderLogo(id: ProviderId, extraClass = ""): string {
+function renderProviderLogo(id: ProviderId, extraClass = "", label = ""): string {
   const cfg = PROVIDER_LOGOS[id];
+  if (!cfg) {
+    const letter = (Array.from(label.trim())[0] ?? "S").toUpperCase();
+    return `<span class="logo-letter ${extraClass}" aria-hidden="true">${escapeHtml(letter)}</span>`;
+  }
   const cls = `${extraClass} ${cfg.fullBleed ? "full-bleed" : ""}`.trim();
   return `<img src="${cfg.src}" alt="${escapeHtml(id)}" class="${cls}" draggable="false" />`;
 }
@@ -615,6 +627,8 @@ function renderModal(provider: ProviderInfo): string {
           <div class="modal-title">新增 ${escapeHtml(provider.shortName)} 账号</div>
           <div class="modal-desc">每个账号拥有独立隔离的登录态。备注可留空，登录成功后将自动显示邮箱名称。</div>
           <input id="modal-alias-input" class="modal-input" maxlength="60" placeholder="备注名称（留空则自动获取登录邮箱）" value="${escapeHtml(modal.draft)}" />
+          <div class="modal-desc" style="margin-top:14px; margin-bottom:6px;">导入 Cookie 登录（可选）：已在浏览器登录过时，粘贴 Cookie 可直接进入已登录状态，免走网页登录。支持浏览器扩展导出的 JSON 数组、cookies.txt，或 F12 请求头里的 Cookie 整行；同时导入 muse.ai 与 meta.com 的 Cookie 时邮箱也能自动识别。Cookie 只存本机。</div>
+          <textarea id="modal-import-cookie" class="modal-input modal-textarea" rows="3" placeholder="粘贴 Cookie（可留空，留空则打开网页登录）">${escapeHtml(modal.cookieDraft)}</textarea>
           <div class="modal-footer">
             <button id="modal-cancel-btn" class="btn" type="button">取消</button>
             <button id="modal-confirm-btn" class="btn primary" type="button">创建并打开</button>
@@ -685,6 +699,36 @@ function renderModal(provider: ProviderInfo): string {
       </div>
     `;
   }
+  if (modal.kind === "add-site") {
+    return `
+      <div class="inline-modal" role="dialog" aria-modal="true">
+        <div class="modal-card">
+          <div class="modal-title">添加自定义服务</div>
+          <div class="modal-desc">填任意网站的网址（https），它会像 Muse / GLaDOS 一样出现在服务栏里，可添加多个隔离账号、网页登录使用。注意：只有真正的网页版站点才适用；只有 App、没有网页控制台的服务加进来也只能看到下载页。</div>
+          <input id="modal-site-name" class="modal-input" maxlength="24" placeholder="服务名称，如 Cue" value="${escapeHtml(modal.nameDraft)}" />
+          <input id="modal-site-url" class="modal-input" style="margin-top:10px;" maxlength="300" placeholder="https://example.com/" value="${escapeHtml(modal.urlDraft)}" />
+          <div class="modal-footer">
+            <button id="modal-cancel-btn" class="btn" type="button">取消</button>
+            <button id="modal-confirm-btn" class="btn primary" type="button">添加服务</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  if (modal.kind === "remove-site") {
+    return `
+      <div class="inline-modal" role="dialog" aria-modal="true">
+        <div class="modal-card">
+          <div class="modal-title">删除自定义服务</div>
+          <div class="modal-desc">删除「${escapeHtml(modal.name)}」服务定义。该服务名下还有账号时会被拒绝，请先删除账号。</div>
+          <div class="modal-footer">
+            <button id="modal-cancel-btn" class="btn" type="button">取消</button>
+            <button id="modal-confirm-btn" class="btn danger" type="button">删除服务</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
   if (modal.kind === "proxy") {
     return `
       <div class="inline-modal" role="dialog" aria-modal="true">
@@ -698,6 +742,11 @@ function renderModal(provider: ProviderInfo): string {
           </label>
           <div class="modal-desc" style="margin-top:14px;">保活视图上限（仅 Muse）：后台保持就绪的账号视图数量，可填 1-32 任意数值；留空 = 默认 6，填 0 = 不限。越多切换越快、内存占用越高；闲置超过 30 分钟的保活视图会自动回收，冷账号的额度会通过临时视图轮流刷新，不占用保活名额。GLaDOS 不保活，离开即关、冷加载打开。</div>
           <input id="modal-warm-limit" class="modal-input" type="number" min="0" max="32" step="1" placeholder="默认 6" value="${escapeHtml(modal.warmLimit)}" />
+          <div class="modal-desc" style="margin-top:14px;">工具权限自动审批：开启后，前台与后台保活的 Muse 账号出现权限审批卡时，叠号会自动点击「允许一次」，并发送一条系统通知告知。涉及删除、注销、退出登录、支付、改密等高危操作的卡片会被拦截、不会自动批准。默认关闭，确认你信任正在跑的任务再开。</div>
+          <label class="modal-check-row">
+            <input id="modal-auto-approve" type="checkbox" ${modal.autoApprove ? "checked" : ""} />
+            <span>自动审批权限请求（前台与后台保活账号）</span>
+          </label>
           ${snapshot ? `<div class="modal-desc" style="margin-top:10px;">当前保活视图：${snapshot.warmViewCount} 个（上限 ${snapshot.warmViewLimit === null ? "默认 6" : snapshot.warmViewLimit === 0 ? "不限" : snapshot.warmViewLimit}）</div>` : ""}
           <div class="modal-footer">
             <button id="modal-cancel-btn" class="btn" type="button">取消</button>
@@ -918,7 +967,9 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
             : "";
 
         let compactSubHtml = "";
-        if (switching && !hasDetail) {
+        if (acc.pageError && !isLoggedOut) {
+          compactSubHtml = `<div class="account-sub page-error"><span class="quota-label-text">状态异常：页面出错或被限制，可在上方待处理队列点「清理重登」</span></div>`;
+        } else if (switching && !hasDetail) {
           compactSubHtml = `<div class="account-sub loading-text"><span class="quota-label-text">正在加载…</span></div>`;
         } else if (isGlados) {
           if (isLoggedOut) {
@@ -1053,17 +1104,17 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
       </div>
       <div class="header-actions">${headerBtnHtml}</div>
     </div>
-    ${
-      state.providers.filter((p) => p.enabled).length > 1
-        ? `<div class="provider-switch">${state.providers
-            .filter((p) => p.enabled)
-            .map(
-              (p) =>
-                `<button class="provider-chip ${p.id === provider.id ? "active" : ""}" data-provider="${escapeHtml(p.id)}" type="button">${renderProviderLogo(p.id, "chip-logo")}<span>${escapeHtml(p.shortName)}</span></button>`
-            )
-            .join("")}</div>`
+    <div class="provider-switch">${state.providers
+      .filter((p) => p.enabled)
+      .map(
+        (p) =>
+          `<button class="provider-chip ${p.id === provider.id ? "active" : ""}" data-provider="${escapeHtml(p.id)}" type="button">${renderProviderLogo(p.id, "chip-logo", p.shortName)}<span>${escapeHtml(p.shortName)}</span></button>`
+      )
+      .join("")}<button id="add-site-btn" class="provider-chip add-chip" type="button" title="添加自定义服务">＋</button>${
+      provider.id.startsWith("custom:")
+        ? `<button id="remove-site-btn" class="provider-chip remove-chip" type="button" title="删除此自定义服务">删除服务</button>`
         : ""
-    }
+    }</div>
     ${noticeHtml}
     ${conflictsHtml}
     ${renderPendingQueue(state)}
@@ -1073,6 +1124,7 @@ function renderMiddleContent(state: ManagerSnapshot, provider: ProviderInfo): st
     <div class="column-footer">
       <span class="footer-brand"><img src="/logos/app-logo.svg" alt="" class="footer-brand-img" draggable="false" />叠号</span>
       <span class="footer-spacer"></span>
+      <button id="group-panel-btn" class="footer-util-btn" title="多账号群聊协作" type="button"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg><span>群聊</span></button>
       <button id="notify-settings-btn" class="footer-util-btn" title="系统通知设置" type="button">${ICON_BELL}<span>通知</span></button>
       <button id="proxy-settings-btn" class="footer-util-btn ${state.proxyUrl ? "proxy-active" : ""}" title="${state.proxyUrl ? `代理：${escapeHtml(state.proxyUrl)}` : "代理设置"}" type="button">${ICON_PROXY}<span>代理</span>${state.proxyUrl ? `<span class="update-dot"></span>` : ""}</button>
       <button id="check-update-btn" class="footer-util-btn ${updateState.result?.hasUpdate ? "has-update" : ""}" title="${updateState.result?.hasUpdate ? `发现新版本 v${escapeHtml(updateState.result.latestVersion)}` : "检查更新"}" type="button">${ICON_UPDATE}<span>更新</span>${updateState.result?.hasUpdate ? `<span class="update-dot"></span>` : ""}</button>
@@ -1185,7 +1237,7 @@ function chatHitRow(h: GlobalChatHit): string {
       </button>`;
 }
 
-type PendingKind = "waiting" | "done" | "logged_out";
+type PendingKind = "waiting" | "error" | "done" | "logged_out";
 
 function pendingItemsOf(
   st: ManagerSnapshot
@@ -1194,12 +1246,14 @@ function pendingItemsOf(
   for (const acc of st.accounts) {
     if (acc.sessionState === "waiting" && acc.authState !== "logged_out")
       items.push({ acc, kind: "waiting", label: "等审批" });
+    else if (acc.pageError && acc.authState !== "logged_out")
+      items.push({ acc, kind: "error", label: "状态异常" });
     else if (acc.sessionState === "done")
       items.push({ acc, kind: "done", label: "已完成" });
     else if (acc.authState === "logged_out")
       items.push({ acc, kind: "logged_out", label: "登录过期" });
   }
-  const order: Record<PendingKind, number> = { waiting: 0, done: 1, logged_out: 2 };
+  const order: Record<PendingKind, number> = { waiting: 0, error: 1, done: 2, logged_out: 3 };
   return items.sort((a, b) => order[a.kind] - order[b.kind]);
 }
 
@@ -1218,6 +1272,7 @@ function renderPendingQueue(st: ManagerSnapshot): string {
         <span class="queue-alias">${escapeHtml(acc.alias)}</span>
         <span class="queue-provider">${escapeHtml(providerShortName(st, acc.providerId))}</span>
         ${kind === "waiting" && acc.pendingDetail ? `<span class="queue-detail">${escapeHtml(acc.pendingDetail)}</span>` : ""}
+        ${kind === "error" ? `<span class="queue-action" data-reset="1">清理重登</span>` : ""}
       </button>`
     )
     .join("");
@@ -1401,6 +1456,269 @@ async function runChatSearch(): Promise<void> {
   }
 }
 
+// ---------- 群聊协作面板 ----------
+
+function currentGroup(): ChatGroupView | null {
+  if (!groupData || !groupData.groups.length) return null;
+  return groupData.groups.find((g) => g.id === currentGroupId) ?? groupData.groups[0];
+}
+
+function scrollGroupTranscript(): void {
+  const el = document.querySelector<HTMLElement>("#group-transcript");
+  if (el) el.scrollTop = el.scrollHeight;
+}
+
+function showGroupError(err: unknown): void {
+  const st = document.querySelector<HTMLElement>(".group-status");
+  if (st) st.textContent = String(err);
+}
+
+async function openGroupPanel(): Promise<void> {
+  groupPanelOpen = true;
+  try {
+    snapshot = await invoke<ManagerSnapshot>("set_modal_active", { active: true });
+  } catch {
+    /* 忽略：面板照常打开 */
+  }
+  try {
+    groupData = await invoke<GroupData>("get_group_data");
+    if (!currentGroupId && groupData.groups.length) {
+      currentGroupId = groupData.groups[0].id;
+    }
+  } catch {
+    /* 忽略 */
+  }
+  render();
+  scrollGroupTranscript();
+  if (groupPollTimer !== null) window.clearInterval(groupPollTimer);
+  groupPollTimer = window.setInterval(() => {
+    void pollGroupData();
+  }, 2500);
+}
+
+async function closeGroupPanel(): Promise<void> {
+  groupPanelOpen = false;
+  if (groupPollTimer !== null) {
+    window.clearInterval(groupPollTimer);
+    groupPollTimer = null;
+  }
+  try {
+    snapshot = await invoke<ManagerSnapshot>("set_modal_active", { active: false });
+  } catch {
+    /* 忽略 */
+  }
+  render();
+}
+
+async function pollGroupData(): Promise<void> {
+  if (!groupPanelOpen) return;
+  const active = document.activeElement;
+  if (
+    active &&
+    active.closest(".group-panel") &&
+    (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")
+  ) {
+    return;
+  }
+  try {
+    const fresh = await invoke<GroupData>("get_group_data");
+    if (JSON.stringify(fresh) !== JSON.stringify(groupData)) {
+      groupData = fresh;
+      render();
+      scrollGroupTranscript();
+    }
+  } catch {
+    /* 忽略 */
+  }
+}
+
+function groupApiRowHtml(m: { id: string; name: string; baseUrl: string; model: string; hasKey: boolean }): string {
+  return `<div class="group-api-row" data-api-row>
+    <input class="modal-input g-api-name" placeholder="名称（如 DeepSeek）" value="${escapeHtml(m.name)}" data-api-id="${escapeHtml(m.id)}" />
+    <input class="modal-input g-api-base" placeholder="接口地址 https://api.deepseek.com/v1" value="${escapeHtml(m.baseUrl)}" />
+    <input class="modal-input g-api-model" placeholder="模型（如 deepseek-chat）" value="${escapeHtml(m.model)}" />
+    <input class="modal-input g-api-key" type="password" placeholder="${m.hasKey ? "API Key 已设置（留空不改）" : "API Key"}" value="" />
+  </div>`;
+}
+
+function renderGroupPanel(): string {
+  const g = currentGroup();
+  const head = `<div class="group-side-head"><span>群聊协作</span><span><button id="group-new-btn" class="mini-btn" type="button">+ 新建</button> <button id="group-close-btn" class="mini-btn" type="button">关闭</button></span></div>`;
+  if (!g || !groupData) {
+    return `<div class="group-panel"><div class="group-side">${head}<div class="group-empty">还没有群聊。点「+ 新建」创建一个，把多个 Muse 账号和外部 API 拉进同一个对话里协作。</div></div><div class="group-main"><div class="group-empty">新建群聊后，在左侧勾选成员、选协作模式，就能开始群聊。</div></div></div>`;
+  }
+  const gd = groupData;
+  const groupsHtml = gd.groups
+    .map(
+      (gr) =>
+        `<button type="button" class="group-item ${gr.id === g.id ? "active" : ""}" data-group-id="${escapeHtml(gr.id)}">${escapeHtml(gr.name)}${gd.runs[gr.id] ? `<span class="group-running-dot"></span>` : ""}</button>`
+    )
+    .join("");
+  const museAccounts = (snapshot?.accounts ?? []).filter((a) => a.providerId === "muse");
+  const memberChecks = museAccounts.length
+    ? museAccounts
+        .map((a) => {
+          const checked = g.memberKeys.some((k) => k.uuid === a.uuid);
+          return `<label class="group-member-row"><input type="checkbox" data-member-uuid="${escapeHtml(a.uuid)}" ${checked ? "checked" : ""} /> <span>${escapeHtml(a.alias)}</span>${a.authState === "logged_out" ? `<span class="group-member-note">未登录</span>` : ""}</label>`;
+        })
+        .join("")
+    : `<div class="group-member-note">暂无 Muse 账号</div>`;
+  const apiRows = g.apiMembers.map((m) => groupApiRowHtml(m)).join("");
+  const phase = gd.runs[g.id];
+  const transcript = g.transcript.length
+    ? g.transcript
+        .map((msg) => {
+          if (msg.role === "user") {
+            return `<div class="gmsg user"><div class="gmsg-author">我</div><div class="gmsg-text">${escapeHtml(msg.text)}</div></div>`;
+          }
+          if (msg.role === "system") {
+            return `<div class="gmsg system"><div class="gmsg-text">${escapeHtml(msg.text)}</div></div>`;
+          }
+          return `<div class="gmsg member"><div class="gmsg-author">${escapeHtml(msg.author)}</div><div class="gmsg-text">${escapeHtml(msg.text)}</div></div>`;
+        })
+        .join("")
+    : `<div class="group-empty">暂无消息。在下方输入问题，成员们会按所选模式作答。Muse 成员会在各自账号里真实开一个新对话来回答。</div>`;
+  return `<div class="group-panel">
+    <div class="group-side">
+      ${head}
+      <div class="group-list">${groupsHtml}</div>
+      <div class="group-settings">
+        <div class="group-set-title">群聊设置</div>
+        <input id="g-name" class="modal-input" maxlength="30" value="${escapeHtml(g.name)}" placeholder="群聊名称" />
+        <select id="g-mode" class="modal-input">
+          <option value="parallel" ${g.mode === "parallel" ? "selected" : ""}>并行讨论（各自独立作答）</option>
+          <option value="review" ${g.mode === "review" ? "selected" : ""}>评审流（先答后评）</option>
+          <option value="relay" ${g.mode === "relay" ? "selected" : ""}>A2A 接力（依次承接完善）</option>
+        </select>
+        <div class="group-set-label">Muse 成员</div>
+        ${memberChecks}
+        <div class="group-set-label">API 成员（OpenAI 兼容）<button id="g-api-add" class="mini-btn" type="button">+ 添加一行</button></div>
+        <div id="g-api-rows">${apiRows}</div>
+        <div class="group-set-label">共享上下文（每轮随问题发给每位成员）</div>
+        <textarea id="g-context" class="modal-input modal-textarea" rows="3" placeholder="如：回答请务实、简洁，给出可执行结论">${escapeHtml(g.sharedContext)}</textarea>
+        <div class="group-set-actions">
+          <button id="g-save" class="btn primary" type="button">保存设置</button>
+          <button id="g-delete" class="btn danger" type="button">删除群聊</button>
+        </div>
+      </div>
+    </div>
+    <div class="group-main">
+      <div class="group-status">${phase ? `<span class="group-phase-dot"></span>${escapeHtml(phase)}` : "就绪。@成员名 只问某位，@全体 问所有人；不 @ 默认问全体成员。"}</div>
+      <div class="group-transcript" id="group-transcript">${transcript}</div>
+      <div class="group-input-row">
+        <textarea id="g-input" class="modal-input" rows="2" placeholder="输入消息，Enter 发送（Shift+Enter 换行）"></textarea>
+        <button id="g-send" class="btn primary" type="button" ${phase ? "disabled" : ""}>发送</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function bindGroupPanel(): void {
+  document.querySelector("#group-close-btn")?.addEventListener("click", () => {
+    void closeGroupPanel();
+  });
+  document.querySelector("#group-new-btn")?.addEventListener("click", async () => {
+    try {
+      groupData = await invoke<GroupData>("create_group", { name: "" });
+      currentGroupId = groupData.groups[groupData.groups.length - 1]?.id ?? currentGroupId;
+      render();
+    } catch (err) {
+      showGroupError(err);
+    }
+  });
+  document.querySelectorAll<HTMLElement>("[data-group-id]").forEach((el) => {
+    el.addEventListener("click", () => {
+      currentGroupId = el.dataset.groupId ?? null;
+      render();
+      scrollGroupTranscript();
+    });
+  });
+  document.querySelector("#g-api-add")?.addEventListener("click", () => {
+    const rows = document.querySelector("#g-api-rows");
+    if (rows) {
+      rows.insertAdjacentHTML(
+        "beforeend",
+        groupApiRowHtml({ id: "", name: "", baseUrl: "", model: "", hasKey: false })
+      );
+      bindGroupPanelApiRemove();
+    }
+  });
+  document.querySelector("#g-save")?.addEventListener("click", async () => {
+    const g = currentGroup();
+    if (!g) return;
+    const name = document.querySelector<HTMLInputElement>("#g-name")?.value ?? g.name;
+    const mode = document.querySelector<HTMLSelectElement>("#g-mode")?.value ?? "parallel";
+    const memberKeys = Array.from(
+      document.querySelectorAll<HTMLInputElement>("[data-member-uuid]")
+    )
+      .filter((c) => c.checked)
+      .map((c) => ({ providerId: "muse", uuid: c.dataset.memberUuid ?? "" }));
+    const apiMembers = Array.from(document.querySelectorAll<HTMLElement>("[data-api-row]"))
+      .map((row) => {
+        const nameEl = row.querySelector<HTMLInputElement>(".g-api-name");
+        return {
+          id: nameEl?.dataset.apiId ?? "",
+          name: nameEl?.value ?? "",
+          baseUrl: row.querySelector<HTMLInputElement>(".g-api-base")?.value ?? "",
+          model: row.querySelector<HTMLInputElement>(".g-api-model")?.value ?? "",
+          apiKey: row.querySelector<HTMLInputElement>(".g-api-key")?.value || null,
+        };
+      })
+      .filter((m) => m.name.trim() || m.id);
+    const sharedContext = document.querySelector<HTMLTextAreaElement>("#g-context")?.value ?? "";
+    try {
+      groupData = await invoke<GroupData>("save_group", {
+        input: { id: g.id, name, memberKeys, apiMembers, mode, sharedContext },
+      });
+      render();
+    } catch (err) {
+      showGroupError(err);
+    }
+  });
+  const deleteBtn = document.querySelector<HTMLButtonElement>("#g-delete");
+  deleteBtn?.addEventListener("click", async () => {
+    const g = currentGroup();
+    if (!g) return;
+    if (deleteBtn.dataset.armed !== "1") {
+      deleteBtn.dataset.armed = "1";
+      deleteBtn.textContent = "确认删除？";
+      return;
+    }
+    try {
+      groupData = await invoke<GroupData>("delete_group", { groupId: g.id });
+      currentGroupId = groupData.groups[0]?.id ?? null;
+      render();
+    } catch (err) {
+      showGroupError(err);
+    }
+  });
+  const doSend = async () => {
+    const g = currentGroup();
+    if (!g) return;
+    const input = document.querySelector<HTMLTextAreaElement>("#g-input");
+    const text = (input?.value ?? "").trim();
+    if (!text) return;
+    try {
+      groupData = await invoke<GroupData>("send_group_message", { groupId: g.id, text });
+      render();
+      scrollGroupTranscript();
+    } catch (err) {
+      showGroupError(err);
+    }
+  };
+  document.querySelector("#g-send")?.addEventListener("click", doSend);
+  document.querySelector<HTMLTextAreaElement>("#g-input")?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey) {
+      ev.preventDefault();
+      void doSend();
+    }
+  });
+}
+
+function bindGroupPanelApiRemove(): void {
+  /* 预留：API 行删除暂通过清空名称并保存实现 */
+}
+
 function render(): void {
   // 拖拽排序进行中不重渲染（否则后台快照会打断拖拽），拖拽结束后统一刷新。
   if (dragInProgress) return;
@@ -1417,6 +1735,7 @@ function render(): void {
         ${renderRightStage(snapshot, provider)}
       </div>
       ${palette.open ? renderPalette(snapshot) : ""}
+      ${groupPanelOpen ? renderGroupPanel() : ""}
     `;
 
   bindEvents(snapshot, provider);
@@ -1459,10 +1778,19 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     if (provider.id === "glados") {
       await setModal({ kind: "add-glados", domainDraft: "glados.cloud", cookieDraft: "" });
     } else {
-      await setModal({ kind: "add", providerId: provider.id, draft: "" });
+      await setModal({ kind: "add", providerId: provider.id, draft: "", cookieDraft: "" });
     }
   };
   document.querySelector("#add-account-btn")?.addEventListener("click", openAddModal);
+  document.querySelector("#add-site-btn")?.addEventListener("click", () => {
+    void setModal({ kind: "add-site", nameDraft: "", urlDraft: "" });
+  });
+  document.querySelector("#remove-site-btn")?.addEventListener("click", () => {
+    const prov = currentProvider(state);
+    if (prov && prov.id.startsWith("custom:")) {
+      void setModal({ kind: "remove-site", defId: prov.id.slice("custom:".length), name: prov.name });
+    }
+  });
   document.querySelector("#stage-add-btn")?.addEventListener("click", openAddModal);
 
   document.querySelector("#dismiss-notice-btn")?.addEventListener("click", async () => {
@@ -1471,9 +1799,13 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
 
   document.querySelector("#proxy-settings-btn")?.addEventListener("click", async () => {
     if (modal.kind !== "none") return;
-    await setModal({ kind: "proxy", draft: state.proxyUrl ?? "", warmLimit: state.warmViewLimit === null ? "" : String(state.warmViewLimit), followSystem: state.proxyFollowSystem });
+    await setModal({ kind: "proxy", draft: state.proxyUrl ?? "", warmLimit: state.warmViewLimit === null ? "" : String(state.warmViewLimit), followSystem: state.proxyFollowSystem, autoApprove: state.autoApprove });
   });
 
+  document.querySelector("#group-panel-btn")?.addEventListener("click", () => {
+    void openGroupPanel();
+  });
+  if (groupPanelOpen) bindGroupPanel();
   document.querySelector("#notify-settings-btn")?.addEventListener("click", async () => {
     if (modal.kind !== "none") return;
     let status = "unknown";
@@ -1560,12 +1892,15 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
   });
 
   document.querySelectorAll<HTMLElement>("[data-queue-uuid]").forEach((el) => {
-    el.addEventListener("click", async () => {
+    el.addEventListener("click", async (ev) => {
       const uuid = el.dataset.queueUuid;
       const providerId = el.dataset.queueProvider;
-      if (uuid && providerId) {
-        await callCommand("switch_account", { providerId, uuid });
+      if (!uuid || !providerId) return;
+      if ((ev.target as HTMLElement).closest("[data-reset]")) {
+        await callCommand("reset_account_session", { providerId, uuid });
+        return;
       }
+      await callCommand("switch_account", { providerId, uuid });
     });
   });
 
@@ -1854,6 +2189,13 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
     }
   });
 
+  const importCookieInput = document.querySelector<HTMLTextAreaElement>("#modal-import-cookie");
+  importCookieInput?.addEventListener("input", () => {
+    if (modal.kind === "add") {
+      modal.cookieDraft = importCookieInput.value;
+    }
+  });
+
   const domainSelect = document.querySelector<HTMLSelectElement>("#modal-domain-select");
   domainSelect?.addEventListener("change", () => {
     if (modal.kind === "add-glados") {
@@ -1890,6 +2232,7 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
       await callCommand("add_account", {
         providerId: currentModal.providerId,
         alias,
+        importCookie: currentModal.cookieDraft.trim() || null,
       });
     } else if (currentModal.kind === "rename") {
       const alias = currentModal.draft.trim();
@@ -1922,6 +2265,18 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
       const uuid = currentModal.account.uuid;
       await setModal({ kind: "none" });
       await callCommand("update_glados_cookie", { uuid, cookie });
+    } else if (currentModal.kind === "add-site") {
+      const nameEl = document.querySelector<HTMLInputElement>("#modal-site-name");
+      const urlEl = document.querySelector<HTMLInputElement>("#modal-site-url");
+      const name = (nameEl?.value ?? currentModal.nameDraft).trim();
+      const url = (urlEl?.value ?? currentModal.urlDraft).trim();
+      if (!name || !url) return;
+      await setModal({ kind: "none" });
+      await callCommand("add_custom_site", { name, entryUrl: url });
+    } else if (currentModal.kind === "remove-site") {
+      const defId = currentModal.defId;
+      await setModal({ kind: "none" });
+      await callCommand("remove_custom_site", { defId });
     } else if (currentModal.kind === "remove") {
       await setModal({ kind: "none" });
       await callCommand("remove_account", {
@@ -1952,6 +2307,10 @@ function bindEvents(state: ManagerSnapshot, provider: ProviderInfo): void {
       }
       if (followSystem !== undefined && followSystem !== snapshot?.proxyFollowSystem) {
         await callCommand("set_proxy_follow_system", { enabled: followSystem });
+      }
+      const approveEl = document.querySelector<HTMLInputElement>("#modal-auto-approve");
+      if (approveEl && approveEl.checked !== snapshot?.autoApprove) {
+        await callCommand("set_auto_approve", { enabled: approveEl.checked });
       }
     }
   });

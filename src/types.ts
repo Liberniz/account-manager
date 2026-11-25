@@ -1,4 +1,4 @@
-export type ProviderId = "muse" | "glados";
+export type ProviderId = string; // 内置 "muse" | "glados"；自定义服务为 "custom:<defId>"
 export type AuthState = "unknown" | "authenticated" | "logged_out";
 
 export interface AccountKey {
@@ -45,6 +45,7 @@ export interface AccountRecord {
   note: string;
   sessionState: string;
   pendingDetail: string;
+  pageError: boolean;
   viewError: boolean;
   sortOrder: number;
   gdDomain: string;
@@ -76,6 +77,7 @@ export interface ManagerSnapshot {
   proxyUrl: string | null;
   warmViewLimit: number | null;
   proxyFollowSystem: boolean;
+  autoApprove: boolean;
   warmViewCount: number;
 }
 
@@ -119,4 +121,34 @@ export interface UpdateProgressEvent {
 export interface InstallUpdateOutcome {
   status: string;
   message: string;
+}
+
+export interface ApiMemberView {
+  id: string;
+  name: string;
+  baseUrl: string;
+  model: string;
+  hasKey: boolean;
+}
+
+export interface GroupMsg {
+  author: string;
+  role: string;
+  text: string;
+  tsMs: number;
+}
+
+export interface ChatGroupView {
+  id: string;
+  name: string;
+  memberKeys: AccountKey[];
+  apiMembers: ApiMemberView[];
+  mode: string;
+  sharedContext: string;
+  transcript: GroupMsg[];
+}
+
+export interface GroupData {
+  groups: ChatGroupView[];
+  runs: Record<string, string>;
 }

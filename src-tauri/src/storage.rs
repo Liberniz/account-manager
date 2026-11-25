@@ -106,6 +106,12 @@ pub struct AccountRecord {
   /// GLaDOS 状态拉取失败原因（如「Cookie 已失效」），空串表示无错误。
   #[serde(default)]
   pub gd_error: String,
+  /// 导入登录的 Cookie 原文（JSON / Netscape / Cookie 头，仅落盘；快照抹掉）。
+  #[serde(default)]
+  pub import_cookie: String,
+  /// 页面异常标记（错误页/受限页；运行时由探针覆盖，落盘值无意义）。
+  #[serde(default)]
+  pub page_error: bool,
 }
 
 /// 主窗口几何（逻辑像素的位置与尺寸），用于重启后恢复窗口大小/位置。
@@ -138,6 +144,10 @@ pub struct AccountsStoreFile {
   pub warm_view_limit: Option<u32>,
   #[serde(default)]
   pub proxy_follow_system: bool,
+  /// 工具权限自动审批开关（默认关）：前台与保活视图出现审批卡时自动点
+  /// 「允许一次」，命中高危关键词的操作拦截不批。
+  #[serde(default)]
+  pub auto_approve: bool,
   #[serde(default)]
   pub window_geometry: Option<WindowGeometry>,
 }
@@ -152,6 +162,7 @@ impl Default for AccountsStoreFile {
       proxy_url: None,
       warm_view_limit: None,
       proxy_follow_system: false,
+      auto_approve: false,
       window_geometry: None,
     }
   }
@@ -216,7 +227,7 @@ pub fn detect_conflicts(accounts: &[AccountRecord]) -> Vec<ConflictItem> {
   for acc in accounts {
     let entry = by_uuid.entry(acc.uuid.clone()).or_default();
     if !entry.contains(&acc.provider_id) {
-      entry.push(acc.provider_id);
+      entry.push(acc.provider_id.clone());
     }
   }
   let mut count_by_uuid: BTreeMap<String, usize> = BTreeMap::new();
@@ -236,7 +247,7 @@ pub fn detect_conflicts(accounts: &[AccountRecord]) -> Vec<ConflictItem> {
 fn parse_key_or_legacy_muse(val: &Value) -> Option<AccountKey> {
   if let Some(raw_uuid) = val.as_str() {
     return normalize_uuid(raw_uuid).map(|uuid| AccountKey {
-      provider_id: ProviderId::Muse,
+      provider_id: ProviderId::muse(),
       uuid,
     });
   }
@@ -249,7 +260,7 @@ fn parse_key_or_legacy_muse(val: &Value) -> Option<AccountKey> {
   let uuid = normalize_uuid(raw_uuid)?;
   let provider_id = match obj.get("providerId").or_else(|| obj.get("provider_id")) {
     Some(v) => ProviderId::parse(v.as_str()?)?,
-    None => ProviderId::Muse,
+    None => ProviderId::muse(),
   };
   Some(AccountKey { provider_id, uuid })
 }
@@ -288,7 +299,7 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
             None => continue,
           }
         }
-        None if is_legacy => ProviderId::Muse,
+        None if is_legacy => ProviderId::muse(),
         None => return Err("新版配置账号缺少 providerId".to_string()),
       };
       let alias = item_obj
@@ -409,6 +420,13 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
           .and_then(|v| v.as_str())
           .unwrap_or("")
           .to_string(),
+        import_cookie: item_obj
+          .get("importCookie")
+          .or_else(|| item_obj.get("import_cookie"))
+          .and_then(|v| v.as_str())
+          .unwrap_or("")
+          .to_string(),
+        page_error: false,
       });
     }
   }
@@ -442,6 +460,12 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
     .and_then(|v| v.as_bool())
     .unwrap_or(false);
 
+  let auto_approve = obj
+    .get("autoApprove")
+    .or_else(|| obj.get("auto_approve"))
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false);
+
   let warm_view_limit = obj
     .get("warmViewLimit")
     .or_else(|| obj.get("warm_view_limit"))
@@ -471,6 +495,7 @@ fn migrate_from_value(root: Value) -> Result<(AccountsStoreFile, bool), String> 
       proxy_url,
       warm_view_limit,
       proxy_follow_system,
+      auto_approve,
       window_geometry,
     },
     is_legacy,

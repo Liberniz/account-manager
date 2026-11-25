@@ -1676,3 +1676,210 @@ body,
   color: var(--text-2, #5b6470);
   border-top: 1px solid var(--border, #e3e6ea);
 }
+
+/* 深色模式（随系统）：变量层整体翻色 + 结构件硬编码浅色背景覆盖 */
+:root {
+  --surface: #ffffff;
+  --surface-2: #f1f5f9;
+  --text-2: #64748b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --rail-bg: #171b22;
+    --rail-hover: #20262f;
+    --rail-active: #1d2a44;
+    --list-bg: #1b1f27;
+    --stage-bg: #14171d;
+    --card-hover: #222834;
+    --card-active: #1d2a44;
+    --card-active-border: #33507e;
+    --border: #2b3038;
+    --border-strong: #3a414d;
+    --text-main: #e5e9f0;
+    --text-sub: #9aa5b5;
+    --text-muted: #67707f;
+    --primary: #4d94ff;
+    --primary-hover: #6aa6ff;
+    --primary-soft: rgba(77, 148, 255, 0.16);
+    --danger-soft: #3a2326;
+    --warn-bg: #33301d;
+    --warn-border: #6b6236;
+    --warn-text: #e7cf8a;
+    --surface: #22262f;
+    --surface-2: #262b36;
+    --text-2: #9aa5b5;
+  }
+  .modal-card,
+  .account-row,
+  .queue-row,
+  .chat-search-panel,
+  .palette-panel {
+    background: var(--surface);
+  }
+  .account-row:hover { background: var(--card-hover); }
+  .count-badge,
+  .ghost-icon-btn,
+  .icon-btn,
+  .mini-btn {
+    background: var(--surface-2);
+    color: var(--text-main);
+  }
+  .modal-input,
+  .account-search,
+  .palette-input,
+  input.modal-input,
+  textarea.modal-input,
+  select.modal-input {
+    background: var(--stage-bg);
+    color: var(--text-main);
+    border-color: var(--border);
+  }
+  .inline-modal { background: rgba(0, 0, 0, 0.55); }
+  .palette-overlay { background: rgba(0, 0, 0, 0.6); }
+  .palette-item.selected { background: var(--surface-2); }
+  .chat-hit:hover { background: var(--card-hover); }
+}
+
+/* 自定义服务：字母占位 logo + 服务栏增删 chip */
+.logo-letter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 700;
+  border-radius: 6px;
+}
+img.chip-logo, .logo-letter.chip-logo { width: 18px; height: 18px; font-size: 11px; }
+.stage-logo-tile .logo-letter { width: 44px; height: 44px; font-size: 20px; border-radius: 10px; }
+.empty-icon-circle .logo-letter { width: 44px; height: 44px; font-size: 20px; border-radius: 50%; }
+.provider-chip.add-chip {
+  border-style: dashed;
+  color: var(--text-sub);
+  padding: 4px 10px;
+}
+.provider-chip.remove-chip {
+  color: var(--danger);
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+/* 状态异常：队列红标 + 清理重登 + 行内红字 */
+.queue-error .queue-badge { background: var(--danger-soft); color: var(--danger); }
+.queue-action {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  padding: 1px 7px;
+  flex: none;
+}
+.queue-action:hover { background: var(--danger-soft); }
+.account-sub.page-error { color: var(--danger); }
+
+/* 群聊协作面板 */
+.group-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  background: var(--list-bg);
+  color: var(--text-main);
+}
+.group-side {
+  width: 300px;
+  flex: none;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 12px;
+  gap: 10px;
+}
+.group-side-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  font-size: 14px;
+}
+.group-list { display: flex; flex-direction: column; gap: 4px; }
+.group-item {
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-main);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.group-item:hover { background: var(--card-hover); }
+.group-item.active { background: var(--card-active); border-color: var(--card-active-border); }
+.group-running-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--online);
+  animation: maam-pulse 1.2s ease-in-out infinite;
+}
+@keyframes maam-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+.group-settings { display: flex; flex-direction: column; gap: 8px; }
+.group-set-title { font-weight: 600; margin-top: 4px; }
+.group-set-label { font-size: 12px; color: var(--text-sub); display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
+.group-member-row { display: flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 2px 0; }
+.group-member-note { font-size: 11px; color: var(--text-muted); }
+.group-api-row { display: flex; flex-direction: column; gap: 5px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; }
+.group-set-actions { display: flex; gap: 8px; margin-top: 6px; }
+.group-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.group-status {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-sub);
+  font-size: 12.5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.group-phase-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--primary);
+  animation: maam-pulse 1s ease-in-out infinite;
+  flex: none;
+}
+.group-transcript {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.gmsg { max-width: 85%; }
+.gmsg-author { font-size: 11px; color: var(--text-muted); margin-bottom: 3px; }
+.gmsg-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--surface-2);
+  border-radius: 10px;
+  padding: 8px 11px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.gmsg.user { align-self: flex-end; }
+.gmsg.user .gmsg-author { text-align: right; }
+.gmsg.user .gmsg-text { background: var(--primary-soft); }
+.gmsg.system { align-self: center; max-width: 95%; }
+.gmsg.system .gmsg-text { background: transparent; color: var(--danger); font-size: 12px; text-align: center; }
+.group-input-row {
+  display: flex;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  align-items: flex-end;
+}
+.group-input-row textarea { flex: 1; resize: none; }
+.group-empty { color: var(--text-muted); font-size: 12.5px; padding: 14px 6px; line-height: 1.6; }

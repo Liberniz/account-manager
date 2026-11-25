@@ -95,6 +95,141 @@ fn glados_cookie_script(cookie: &str, domain: &str) -> String {
   glados_cookie_script_impl(cookie, domain, false)
 }
 
+/// 解析导入的 Cookie 文本，返回 (name, value, domain) 列表。
+/// 支持三种格式：JSON 数组（浏览器扩展导出）、Netscape cookies.txt、
+/// HTTP Cookie 请求头（无域名信息，归到服务主域名）。按服务允许域名过滤。
+fn parse_imported_cookies(
+  raw: &str,
+  allowed_hosts: &[String],
+  primary_host: &str,
+) -> Vec<(String, String, String)> {
+  let raw = raw.trim();
+  let mut out: Vec<(String, String, String)> = Vec::new();
+  if raw.is_empty() {
+    return out;
+  }
+  let domain_ok = |domain: &str| -> bool {
+    let d = domain.trim().trim_start_matches('.').to_ascii_lowercase();
+    if d.is_empty() {
+      return false;
+    }
+    allowed_hosts
+      .iter()
+      .any(|h| crate::providers::host_matches(&d, h) || crate::providers::host_matches(h, &d))
+  };
+  if raw.starts_with('[') || raw.starts_with('{') {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+      let items: Vec<&serde_json::Value> = match &v {
+        serde_json::Value::Array(a) => a.iter().collect(),
+        serde_json::Value::Object(o) => o
+          .get("cookies")
+          .and_then(|c| c.as_array())
+          .map(|a| a.iter().collect())
+          .unwrap_or_default(),
+        _ => Vec::new(),
+      };
+      for item in items {
+        let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("");
+        let value = item.get("value").and_then(|x| x.as_str()).unwrap_or("");
+        let domain = item.get("domain").and_then(|x| x.as_str()).unwrap_or("");
+        if !name.is_empty() && domain_ok(domain) {
+          out.push((
+            name.to_string(),
+            value.to_string(),
+            domain.trim().trim_start_matches('.').to_ascii_lowercase(),
+          ));
+        }
+      }
+      return out;
+    }
+  }
+  let netscape_lines = raw
+    .lines()
+    .filter(|l| l.matches('\t').count() >= 6)
+    .count();
+  if netscape_lines > 0 {
+    for line in raw.lines() {
+      let line = line.trim_end();
+      if line.is_empty() {
+        continue;
+      }
+      let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
+      if line.starts_with('#') {
+        continue;
+      }
+      let parts: Vec<&str> = line.split('\t').collect();
+      if parts.len() >= 7 {
+        let (domain, name, value) = (parts[0], parts[5], parts[6]);
+        if !name.is_empty() && domain_ok(domain) {
+          out.push((
+            name.to_string(),
+            value.to_string(),
+            domain.trim().trim_start_matches('.').to_ascii_lowercase(),
+          ));
+        }
+      }
+    }
+    return out;
+  }
+  // Cookie 请求头格式：name=value; name2=value2（归主域名）
+  for pair in raw.split(';') {
+    let pair = pair.trim();
+    if let Some(eq) = pair.find('=') {
+      let (name, value) = (&pair[..eq], &pair[eq + 1..]);
+      let name = name.trim();
+      if !name.is_empty() && !name.contains(char::is_whitespace) {
+        out.push((
+          name.to_string(),
+          value.trim().to_string(),
+          primary_host.to_string(),
+        ));
+      }
+    }
+  }
+  out
+}
+
+/// 生成导入 Cookie 的初始化脚本：页面加载前按当前主机匹配域名逐个种下。
+fn import_cookie_script(raw: &str, allowed_hosts: &[String], primary_host: &str) -> String {
+  let cookies = parse_imported_cookies(raw, allowed_hosts, primary_host);
+  if cookies.is_empty() {
+    return "void 0;".to_string();
+  }
+  let items: Vec<String> = cookies
+    .iter()
+    .map(|(n, v, d)| {
+      let esc = |x: &str| {
+        x.replace('\\', "\\\\")
+          .replace('\'', "\\'")
+          .replace('\n', "")
+          .replace('\r', "")
+      };
+      format!(
+        "{{ n: '{}', v: '{}', d: '{}' }}",
+        esc(n),
+        esc(v),
+        esc(d)
+      )
+    })
+    .collect();
+  format!(
+    r#"(() => {{
+  try {{
+    const host = (location.hostname || '').toLowerCase();
+    const items = [{}];
+    for (const c of items) {{
+      if (host === c.d || host.endsWith('.' + c.d)) {{
+        try {{
+          document.cookie = c.n + '=' + c.v + '; domain=.' + c.d + '; path=/; Secure; SameSite=None';
+        }} catch (e) {{}}
+      }}
+    }}
+  }} catch (e) {{}}
+}})();"#,
+    items.join(", ")
+  )
+}
+
 /// 更新 Cookie 时在已有视图里执行：种入新 Cookie 并立即刷新。
 fn glados_cookie_reset_script(cookie: &str, domain: &str) -> String {
   glados_cookie_script_impl(cookie, domain, true)
@@ -126,12 +261,12 @@ fn normalize_glados_domain(raw: &str) -> Option<String> {
 /// 账号实际入口：GLaDOS 会话按域名隔离，用账号自己的域名进控制台；
 /// 其余服务用 provider 规格里的入口。
 fn entry_url_for(account: &AccountRecord) -> Url {
-  if account.provider_id == ProviderId::Glados && !account.gd_domain.is_empty() {
+  if account.provider_id == ProviderId::glados() && !account.gd_domain.is_empty() {
     if let Ok(u) = Url::parse(&format!("https://{}/console", account.gd_domain)) {
       return u;
     }
   }
-  Url::parse(get_provider(account.provider_id).info.entry_url).expect("valid provider entry url")
+  Url::parse(&get_provider(&account.provider_id).info.entry_url).expect("valid provider entry url")
 }
 
 struct GladosStatus {
@@ -547,6 +682,95 @@ const DOM_PAINT_READY_JS: &str = r#"(() => {
 })()"#;
 
 #[cfg(desktop)]
+/// 自动审批脚本：找到审批卡的「允许一次/允许」按钮，先爬卡片文本查高危
+/// 关键词，命中返回 blocked 不点；有允许+拒绝成对按钮才认为是真审批卡。
+/// 群聊驱动脚本：检测输入框 / 填入并发送 / 轮询回复（文本尾部截取法）。
+const GROUP_COMPOSER_CHECK_JS: &str = r#"(() => {
+  const vis = (el) => !!el && el.offsetParent !== null;
+  const tas = Array.from(document.querySelectorAll('textarea')).filter(vis);
+  const ces = Array.from(document.querySelectorAll('[contenteditable="true"]')).filter(vis);
+  return (tas.length || ces.length) ? 'yes' : 'no';
+})()"#;
+
+const GROUP_SEND_JS: &str = r#"(() => {
+  try {
+    const PROMPT = __PROMPT_JSON__;
+    const vis = (el) => !!el && el.offsetParent !== null;
+    const candidates = [
+      ...document.querySelectorAll('textarea'),
+      ...document.querySelectorAll('[contenteditable="true"]')
+    ].filter(vis);
+    if (!candidates.length) return 'no-composer';
+    candidates.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+    const box = candidates[0];
+    box.focus();
+    if (box.tagName === 'TEXTAREA' || box.tagName === 'INPUT') {
+      const proto = Object.getPrototypeOf(box);
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (setter && setter.set) setter.set.call(box, PROMPT); else box.value = PROMPT;
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+    } else {
+      document.execCommand('selectAll', false, undefined);
+      const ok = document.execCommand('insertText', false, PROMPT);
+      if (!ok || !(box.innerText || '').includes(PROMPT.slice(0, 12))) {
+        box.textContent = PROMPT;
+        box.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      }
+    }
+    const btns = Array.from(document.querySelectorAll('button')).filter(vis);
+    const send = btns.find((b) => /发送|send/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.innerText || '')));
+    if (send) { send.click(); return 'sent'; }
+    box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+    return 'sent';
+  } catch (e) {
+    return 'error';
+  }
+})()"#;
+
+const GROUP_POLL_JS: &str = r#"(() => {
+  try {
+    const HEAD = __HEAD_JSON__;
+    const btns = Array.from(document.querySelectorAll('button')).filter((b) => b.offsetParent !== null);
+    const working = btns.some((b) => /停止|stop/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.innerText || '')));
+    const full = (document.body && document.body.innerText) || '';
+    let text = '';
+    const idx = full.lastIndexOf(HEAD);
+    if (idx >= 0) text = full.slice(idx + HEAD.length).trim();
+    if (text.length > 6000) text = text.slice(text.length - 6000);
+    return JSON.stringify({ working, text });
+  } catch (e) {
+    return JSON.stringify({ working: false, text: '' });
+  }
+})()"#;
+
+const AUTO_APPROVE_JS: &str = r#"(() => {
+  try {
+    const textOf = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    const btns = Array.from(document.querySelectorAll('button')).filter((b) => b.offsetParent !== null);
+    const isAllowOnce = (t) => /^(允许一次|allow once)$/i.test(t);
+    const isAllow = (t) => /^(允许|批准|同意|allow|approve)$/i.test(t);
+    const isDeny = (t) => /^(拒绝|取消|deny|reject|cancel)$/i.test(t);
+    let allow = btns.find((b) => isAllowOnce(textOf(b))) || btns.find((b) => isAllow(textOf(b)));
+    if (!allow) return 'none';
+    const card = allow.closest('div, section, form, dialog') || allow.parentElement;
+    let cardText = card ? textOf(card) : '';
+    let node = allow;
+    for (let i = 0; i < 5 && node && cardText.length < 40; i++) {
+      node = node.parentElement;
+      if (node) cardText = textOf(node);
+    }
+    const siblings = card ? Array.from(card.querySelectorAll('button')) : [];
+    const hasDeny = siblings.some((b) => isDeny(textOf(b)));
+    if (!hasDeny) return 'none';
+    const danger = /(删除|注销|退出登录|退出账号|支付|付款|改密|修改密码|重置密码|delete|remove|sign out|log out|pay now|payment|change password|reset password)/i;
+    if (danger.test(cardText)) return 'blocked';
+    allow.click();
+    return 'clicked';
+  } catch (e) {
+    return 'none';
+  }
+})()"#;
+
 const IDENTITY_PROBE_JS: &str = r#"(() => {
   try {
     const pendingHotkey = window.__maamPendingHotkey || null;
@@ -580,6 +804,21 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
     const makeLoading = () => JSON.stringify({ auth: false, loggedOut: false, typed: typed || phone, email: '', avatar: '', quotaText: '', quotaPct: null, quotaDetail: null, sessionState: 'unknown', pendingHotkey });
     // 会话状态启发式检测（仅 muse.ai）：waiting=页面上有审批请求，
     // working=正在生成（有停止按钮），active=有可用的会话输入框，idle=其他。
+    const detectPageError = () => {
+      try {
+        const title = (document.title || '').toLowerCase();
+        const text = ((document.body && document.body.innerText) || '').slice(0, 3000);
+        const lower = text.toLowerCase();
+        const strong = ['account has been disabled', 'account suspended', '账号已被停用', '账号已被封禁', '账号被限制'];
+        if (strong.some((k) => lower.includes(k) || title.includes(k))) return true;
+        const weak = ['something went wrong', '页面出错了', '页面加载失败', '无法访问此网站', 'bad gateway', 'service unavailable', 'access denied'];
+        const shortPage = text.trim().length < 2500;
+        if (shortPage && weak.some((k) => lower.includes(k) || title.includes(k))) return true;
+        return false;
+      } catch (_) {
+        return false;
+      }
+    };
     const detectSessionState = () => {
       window.__maamPendingDetail = '';
       try {
@@ -905,6 +1144,7 @@ const IDENTITY_PROBE_JS: &str = r#"(() => {
       quotaDetail: quota.detail || null,
       sessionState: detectSessionState(),
       pendingDetail: window.__maamPendingDetail || '',
+      pageError: detectPageError(),
       pendingHotkey
     });
   } catch (_) {
@@ -1017,6 +1257,100 @@ struct ChatIndexEntry {
   updated_at_ms: u64,
 }
 
+/// 群聊里的外部 API 成员（OpenAI 兼容接口；key 只落盘，对界面只报 hasKey）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiMemberDef {
+  pub id: String,
+  pub name: String,
+  pub base_url: String,
+  pub api_key: String,
+  pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupMsg {
+  pub author: String,
+  pub role: String,
+  pub text: String,
+  pub ts_ms: u64,
+}
+
+/// 多账号群聊定义（groups.json 落盘）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatGroupDef {
+  pub id: String,
+  pub name: String,
+  pub member_keys: Vec<AccountKey>,
+  pub api_members: Vec<ApiMemberDef>,
+  /// parallel 并行讨论 / review 评审流 / relay A2A 接力
+  pub mode: String,
+  pub shared_context: String,
+  pub transcript: Vec<GroupMsg>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiMemberView {
+  pub id: String,
+  pub name: String,
+  pub base_url: String,
+  pub model: String,
+  pub has_key: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatGroupView {
+  pub id: String,
+  pub name: String,
+  pub member_keys: Vec<AccountKey>,
+  pub api_members: Vec<ApiMemberView>,
+  pub mode: String,
+  pub shared_context: String,
+  pub transcript: Vec<GroupMsg>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupData {
+  pub groups: Vec<ChatGroupView>,
+  pub runs: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiMemberInput {
+  pub id: String,
+  pub name: String,
+  pub base_url: String,
+  pub model: String,
+  pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupSaveInput {
+  pub id: String,
+  pub name: String,
+  pub member_keys: Vec<AccountKey>,
+  pub api_members: Vec<ApiMemberInput>,
+  pub mode: String,
+  pub shared_context: String,
+}
+
+/// 用户自定义服务定义（custom-sites.json 落盘；注册进 providers 注册表后
+/// 与内置服务走同一套账号/视图流程）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomSiteDef {
+  pub id: String,
+  pub name: String,
+  pub entry_url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChatIndexRecord {
   provider: String,
@@ -1043,6 +1377,7 @@ pub struct ManagerSnapshot {
   pub proxy_url: Option<String>,
   pub warm_view_limit: Option<u32>,
   pub proxy_follow_system: bool,
+  pub auto_approve: bool,
   pub warm_view_count: u32,
 }
 
@@ -1097,6 +1432,7 @@ struct InnerState {
   quota_miss: HashMap<AccountKey, u32>,
   session_states: HashMap<AccountKey, String>,
   pending_details: HashMap<AccountKey, String>,
+  page_errors: HashSet<AccountKey>,
   done_notes: Vec<(String, u64)>,
   chat_index: HashMap<AccountKey, ChatIndexEntry>,
   #[cfg(desktop)]
@@ -1106,6 +1442,9 @@ struct InnerState {
   #[cfg(desktop)]
   quota_probe_running: bool,
   chat_search_running: bool,
+  custom_sites: Vec<CustomSiteDef>,
+  groups: Vec<ChatGroupDef>,
+  group_runs: HashMap<String, String>,
 }
 
 /// 新式通知通道投递失败过的标记（进程内）：旧通道登记后新式状态可能
@@ -1124,17 +1463,25 @@ pub struct SessionManager {
 impl SessionManager {
   pub fn new(app_data_dir: PathBuf) -> Self {
     let store_path = app_data_dir.join("accounts.json");
+    let custom_sites = Self::load_custom_sites_file(&app_data_dir);
+    crate::providers::register_custom_providers(
+      custom_sites
+        .iter()
+        .filter_map(|d| crate::providers::make_custom_spec(&d.id, &d.name, &d.entry_url))
+        .collect(),
+    );
     let loaded = load_or_migrate_store(&store_path);
     let initial_window_geometry = loaded.store.window_geometry;
     let initial_provider = loaded
       .store
       .last_committed
       .as_ref()
-      .map(|k| k.provider_id)
-      .filter(|pid| get_provider(*pid).info.enabled)
-      .unwrap_or(ProviderId::Muse);
+      .map(|k| k.provider_id.clone())
+      .filter(|pid| get_provider(pid).info.enabled)
+      .unwrap_or(ProviderId::muse());
 
     let chat_index = Self::load_chat_index_file(&app_data_dir);
+    let groups = Self::load_groups_file(&app_data_dir);
 
     Self {
       current_seq: Arc::new(AtomicU64::new(1)),
@@ -1162,6 +1509,7 @@ impl SessionManager {
         quota_miss: HashMap::new(),
         session_states: HashMap::new(),
         pending_details: HashMap::new(),
+        page_errors: HashSet::new(),
         done_notes: Vec::new(),
         chat_index,
         #[cfg(desktop)]
@@ -1171,6 +1519,9 @@ impl SessionManager {
         #[cfg(desktop)]
         quota_probe_running: false,
         chat_search_running: false,
+        custom_sites,
+        groups,
+        group_runs: HashMap::new(),
       }),
     }
   }
@@ -1209,12 +1560,13 @@ impl SessionManager {
     snapshot_accounts.sort_by_key(|a| a.sort_order);
     for acc in &mut snapshot_accounts {
       let k = AccountKey {
-        provider_id: acc.provider_id,
+        provider_id: acc.provider_id.clone(),
         uuid: acc.uuid.clone(),
       };
       acc.quota_stale = locked.quota_miss.get(&k).map(|n| *n >= 3).unwrap_or(false);
       // GLaDOS Cookie 同样只落盘。
       acc.gd_cookie = String::new();
+      acc.import_cookie = String::new();
       acc.session_state = locked
         .session_states
         .get(&k)
@@ -1225,6 +1577,7 @@ impl SessionManager {
         .get(&k)
         .cloned()
         .unwrap_or_default();
+      acc.page_error = locked.page_errors.contains(&k);
       #[cfg(desktop)]
       if locked.prewarm_failed.contains(&k) {
         acc.view_error = true;
@@ -1241,7 +1594,7 @@ impl SessionManager {
       platform: current_platform_name(),
       providers: all_provider_infos(),
       accounts: snapshot_accounts,
-      selected_provider_id: locked.selected_provider_id,
+      selected_provider_id: locked.selected_provider_id.clone(),
       active_account,
       switching_account,
       warm_accounts,
@@ -1253,6 +1606,7 @@ impl SessionManager {
       proxy_url: locked.store.proxy_url.clone(),
       warm_view_limit: locked.store.warm_view_limit,
       proxy_follow_system: locked.store.proxy_follow_system,
+      auto_approve: locked.store.auto_approve,
       warm_view_count,
     }
   }
@@ -1276,7 +1630,7 @@ impl SessionManager {
         .as_ref()
         .map(|k| k.provider_id == acc.provider_id && k.uuid == acc.uuid)
         .unwrap_or(false);
-      let state_text = if acc.provider_id == ProviderId::Glados {
+      let state_text = if acc.provider_id == ProviderId::glados() {
         match acc.auth_state {
           crate::storage::AuthState::LoggedOut => "Cookie 已失效".to_string(),
           _ => match acc.gd_left_days {
@@ -1413,7 +1767,7 @@ impl SessionManager {
           .accounts
           .iter()
           .any(|a| a.provider_id == key.provider_id && a.uuid == key.uuid);
-        let enabled = get_provider(key.provider_id).info.enabled;
+        let enabled = get_provider(&key.provider_id).info.enabled;
         if in_cleanup || !exists {
           locked.store.last_committed = None;
           let _ = save_store_atomic(&locked.store_path, &locked.store);
@@ -1422,7 +1776,7 @@ impl SessionManager {
         } else if !enabled {
           None
         } else {
-          locked.selected_provider_id = key.provider_id;
+          locked.selected_provider_id = key.provider_id.clone();
           Some(key)
         }
       } else {
@@ -1498,8 +1852,8 @@ impl SessionManager {
   /// 哪些服务商的视图值得保活：Muse 页面重、加载慢且会话探针依赖活视图；
   /// GLaDOS 控制台轻、状态数据走 API 刷新，离开前台即关、不进暖池。
   #[cfg(desktop)]
-  fn provider_warm_eligible(provider_id: ProviderId) -> bool {
-    matches!(provider_id, ProviderId::Muse)
+  fn provider_warm_eligible(provider_id: &ProviderId) -> bool {
+    provider_id == &ProviderId::muse()
   }
 
   /// 回收闲置超时的暖视图（TTL）：跳过前台视图，跳过工作中 / 待审批的账号
@@ -1565,7 +1919,7 @@ impl SessionManager {
       #[cfg(desktop)]
       {
         let _ = next_seq;
-        if !Self::provider_warm_eligible(old_slot.account_key.provider_id) {
+        if !Self::provider_warm_eligible(&old_slot.account_key.provider_id) {
           // 不保活的服务商（GLaDOS）：离开前台直接关视图，
           // 状态靠 API 刷新，下次打开冷加载，不占暖池名额。
           if let Some(entry) = locked.warm_pool.remove(&old_slot.account_key) {
@@ -1710,9 +2064,9 @@ impl SessionManager {
     #[cfg(desktop)]
     let warm_restore = {
       let mut locked = self.inner.lock().await;
-      locked.selected_provider_id = provider_id;
+      locked.selected_provider_id = provider_id.clone();
       self.hide_foreground_slot(app, next_seq, &mut locked).await;
-      if get_provider(provider_id).info.enabled && locked.conflicts.is_empty() {
+      if get_provider(&provider_id).info.enabled && locked.conflicts.is_empty() {
         locked
           .last_active_per_provider
           .get(&provider_id)
@@ -1748,13 +2102,25 @@ impl SessionManager {
     app: &AppHandle,
     raw_provider: &str,
     raw_alias: &str,
+    import_cookie: &str,
   ) -> Result<ManagerSnapshot, String> {
     let provider_id = ProviderId::parse(raw_provider).ok_or_else(|| "无效的服务标识".to_string())?;
-    if !get_provider(provider_id).info.enabled {
+    if !get_provider(&provider_id).info.enabled {
       return Err(format!(
         "{} 当前待接入，暂不支持添加内嵌账号",
-        get_provider(provider_id).info.name
+        get_provider(&provider_id).info.name
       ));
+    }
+    let import_cookie = import_cookie.trim().to_string();
+    if !import_cookie.is_empty() {
+      let spec = get_provider(&provider_id);
+      let primary = spec.allowed_hosts.first().cloned().unwrap_or_default();
+      if parse_imported_cookies(&import_cookie, &spec.allowed_hosts, &primary).is_empty() {
+        return Err(
+          "没有从粘贴内容里解析到该服务可用的 Cookie（支持 JSON 数组 / cookies.txt / Cookie 请求头）"
+            .to_string(),
+        );
+      }
     }
     let trimmed = raw_alias.trim();
     let (alias, auto_alias) = if trimmed.is_empty() {
@@ -1787,7 +2153,7 @@ impl SessionManager {
         .unwrap_or(-1024)
         + 1024;
       locked.store.accounts.push(AccountRecord {
-        provider_id,
+        provider_id: provider_id.clone(),
         uuid: uuid.clone(),
         alias,
         created_at_ms: now_ms(),
@@ -1811,9 +2177,11 @@ impl SessionManager {
         gd_streak: None,
         gd_synced_at_ms: None,
         gd_error: String::new(),
+        import_cookie,
+        page_error: false,
       });
       save_store_atomic(&locked.store_path, &locked.store)?;
-      locked.selected_provider_id = provider_id;
+      locked.selected_provider_id = provider_id.clone();
       AccountKey { provider_id, uuid }
     };
 
@@ -1847,7 +2215,7 @@ impl SessionManager {
 
     if let Some(slot) = &locked.active_slot {
       if slot.committed && slot.account_key.provider_id == provider_id && slot.account_key.uuid == uuid {
-        let title = format!("{} · {}", get_provider(provider_id).info.short_name, alias);
+        let title = format!("{} · {}", get_provider(&provider_id).info.short_name, alias);
         #[cfg(desktop)]
         if let Some(main_win) = app.get_window("main") {
           let _ = main_win.set_title(&title);
@@ -1892,7 +2260,7 @@ impl SessionManager {
     let provider_id = ProviderId::parse(raw_provider).ok_or_else(|| "无效的服务标识".to_string())?;
     let uuid = normalize_uuid(raw_uuid).ok_or_else(|| "无效的账号 UUID".to_string())?;
     let key = AccountKey {
-      provider_id,
+      provider_id: provider_id.clone(),
       uuid: uuid.clone(),
     };
     let account = {
@@ -2207,7 +2575,7 @@ impl SessionManager {
         .store
         .accounts
         .iter()
-        .filter(|a| a.provider_id == ProviderId::Glados && !a.gd_cookie.is_empty())
+        .filter(|a| a.provider_id == ProviderId::glados() && !a.gd_cookie.is_empty())
         .filter(|a| {
           force
             || a.gd_synced_at_ms
@@ -2217,7 +2585,7 @@ impl SessionManager {
         .map(|a| {
           (
             AccountKey {
-              provider_id: a.provider_id,
+              provider_id: a.provider_id.clone(),
               uuid: a.uuid.clone(),
             },
             a.gd_domain.clone(),
@@ -2303,7 +2671,7 @@ impl SessionManager {
       }
       GladosFetch::Failed(m) => return Err(m),
     };
-    let provider_id = ProviderId::Glados;
+    let provider_id = ProviderId::glados();
     let (alias, auto_alias) = if status.email.is_empty() {
       ("GLaDOS 账号".to_string(), true)
     } else {
@@ -2339,7 +2707,7 @@ impl SessionManager {
         .unwrap_or(-1024)
         + 1024;
       locked.store.accounts.push(AccountRecord {
-        provider_id,
+        provider_id: provider_id.clone(),
         uuid: uuid.clone(),
         alias,
         created_at_ms: now_ms(),
@@ -2363,9 +2731,11 @@ impl SessionManager {
         gd_streak: status.streak,
         gd_synced_at_ms: Some(now_ms()),
         gd_error: String::new(),
+        import_cookie: String::new(),
+        page_error: false,
       });
       save_store_atomic(&locked.store_path, &locked.store)?;
-      locked.selected_provider_id = provider_id;
+      locked.selected_provider_id = provider_id.clone();
       AccountKey { provider_id, uuid }
     };
     self.switch_account_internal(app, created_key, false).await
@@ -2390,7 +2760,7 @@ impl SessionManager {
       );
     }
     let key = AccountKey {
-      provider_id: ProviderId::Glados,
+      provider_id: ProviderId::glados(),
       uuid: raw_uuid.to_string(),
     };
     let domain = {
@@ -2399,7 +2769,7 @@ impl SessionManager {
         .store
         .accounts
         .iter()
-        .find(|a| a.provider_id == ProviderId::Glados && a.uuid == raw_uuid)
+        .find(|a| a.provider_id == ProviderId::glados() && a.uuid == raw_uuid)
         .map(|a| a.gd_domain.clone())
         .ok_or_else(|| "账号不存在".to_string())?
     };
@@ -2419,7 +2789,7 @@ impl SessionManager {
         .store
         .accounts
         .iter_mut()
-        .find(|a| a.provider_id == ProviderId::Glados && a.uuid == raw_uuid)
+        .find(|a| a.provider_id == ProviderId::glados() && a.uuid == raw_uuid)
       else {
         return Err("账号不存在".to_string());
       };
@@ -2457,6 +2827,683 @@ impl SessionManager {
     Ok(snap)
   }
 
+  /// 工具权限自动审批（开关默认关）：在出现审批卡的视图里点「允许一次」；
+  /// 卡片文本命中高危关键词（删除/注销/退出登录/支付/改密等）时拦截不批。
+  async fn maybe_auto_approve(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    webview: &tauri::Webview,
+    key: &AccountKey,
+  ) {
+    let enabled = { self.inner.lock().await.store.auto_approve };
+    if !enabled {
+      return;
+    }
+    let Some(result) = Self::eval_string_result(webview, AUTO_APPROVE_JS).await else {
+      return;
+    };
+    if result == "clicked" {
+      let alias = {
+        let locked = self.inner.lock().await;
+        locked
+          .store
+          .accounts
+          .iter()
+          .find(|a| a.provider_id == key.provider_id && a.uuid == key.uuid)
+          .map(|a| a.alias.clone())
+          .unwrap_or_default()
+      };
+      Self::notify(
+        app,
+        &format!("「{alias}」已自动审批"),
+        "自动审批点掉了这张权限卡（高危操作会被拦截）。不放心可在设置里关掉自动审批。",
+        Some(format!("account-{}", key.uuid)),
+      );
+    }
+  }
+
+  async fn eval_string_result(webview: &tauri::Webview, js: &str) -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let tx_cell = Arc::new(std::sync::Mutex::new(Some(tx)));
+    let tx_inner = Arc::clone(&tx_cell);
+    webview
+      .eval_with_callback(js, move |raw| {
+        if let Some(sender) = tx_inner.lock().unwrap().take() {
+          let _ = sender.send(raw);
+        }
+      })
+      .ok()?;
+    let raw = tokio::time::timeout(std::time::Duration::from_millis(1200), rx)
+      .await
+      .ok()?
+      .ok()?;
+    serde_json::from_str::<String>(&raw).ok()
+  }
+
+  pub async fn set_auto_approve(
+    &self,
+    enabled: bool,
+  ) -> Result<ManagerSnapshot, String> {
+    let mut locked = self.inner.lock().await;
+    locked.store.auto_approve = enabled;
+    save_store_atomic(&locked.store_path, &locked.store)?;
+    Ok(Self::snapshot_from_locked(&locked))
+  }
+
+  // ---------- 多账号群聊协作 ----------
+
+  fn groups_path(app_data_dir: &std::path::Path) -> PathBuf {
+    app_data_dir.join("groups.json")
+  }
+
+  fn load_groups_file(app_data_dir: &std::path::Path) -> Vec<ChatGroupDef> {
+    std::fs::read_to_string(Self::groups_path(app_data_dir))
+      .ok()
+      .and_then(|text| serde_json::from_str::<Vec<ChatGroupDef>>(&text).ok())
+      .unwrap_or_default()
+  }
+
+  fn save_groups_locked(locked: &InnerState) {
+    if let Ok(text) = serde_json::to_string_pretty(&locked.groups) {
+      let _ = std::fs::write(Self::groups_path(&locked.app_data_dir), text);
+    }
+  }
+
+  fn group_data_locked(locked: &InnerState) -> GroupData {
+    GroupData {
+      groups: locked
+        .groups
+        .iter()
+        .map(|g| ChatGroupView {
+          id: g.id.clone(),
+          name: g.name.clone(),
+          member_keys: g.member_keys.clone(),
+          api_members: g
+            .api_members
+            .iter()
+            .map(|m| ApiMemberView {
+              id: m.id.clone(),
+              name: m.name.clone(),
+              base_url: m.base_url.clone(),
+              model: m.model.clone(),
+              has_key: !m.api_key.is_empty(),
+            })
+            .collect(),
+          mode: g.mode.clone(),
+          shared_context: g.shared_context.clone(),
+          transcript: g.transcript.clone(),
+        })
+        .collect(),
+      runs: locked.group_runs.clone(),
+    }
+  }
+
+  pub async fn get_group_data(&self) -> GroupData {
+    let locked = self.inner.lock().await;
+    Self::group_data_locked(&locked)
+  }
+
+  pub async fn create_group(&self, name: String) -> Result<GroupData, String> {
+    let name = name.trim().to_string();
+    let mut locked = self.inner.lock().await;
+    let name = if name.is_empty() {
+      format!("群聊 {}", locked.groups.len() + 1)
+    } else {
+      name
+    };
+    locked.groups.push(ChatGroupDef {
+      id: Uuid::new_v4().hyphenated().to_string(),
+      name,
+      member_keys: Vec::new(),
+      api_members: Vec::new(),
+      mode: "parallel".to_string(),
+      shared_context: String::new(),
+      transcript: Vec::new(),
+    });
+    Self::save_groups_locked(&locked);
+    Ok(Self::group_data_locked(&locked))
+  }
+
+  pub async fn save_group(&self, input: GroupSaveInput) -> Result<GroupData, String> {
+    let mut locked = self.inner.lock().await;
+    let group = locked
+      .groups
+      .iter_mut()
+      .find(|g| g.id == input.id)
+      .ok_or_else(|| "群聊不存在".to_string())?;
+    group.name = input.name.trim().to_string();
+    group.mode = match input.mode.as_str() {
+      "review" | "relay" => input.mode.clone(),
+      _ => "parallel".to_string(),
+    };
+    group.shared_context = input.shared_context.clone();
+    group.member_keys = input
+      .member_keys
+      .iter()
+      .filter(|k| k.provider_id == ProviderId::muse())
+      .cloned()
+      .collect();
+    let mut merged: Vec<ApiMemberDef> = Vec::new();
+    for m in &input.api_members {
+      let existing_key = if m.id.is_empty() {
+        String::new()
+      } else {
+        group
+          .api_members
+          .iter()
+          .find(|e| e.id == m.id)
+          .map(|e| e.api_key.clone())
+          .unwrap_or_default()
+      };
+      let key = match &m.api_key {
+        Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+        _ => existing_key,
+      };
+      merged.push(ApiMemberDef {
+        id: if m.id.is_empty() {
+          Uuid::new_v4().hyphenated().to_string()
+        } else {
+          m.id.clone()
+        },
+        name: m.name.trim().to_string(),
+        base_url: m.base_url.trim().trim_end_matches('/').to_string(),
+        api_key: key,
+        model: m.model.trim().to_string(),
+      });
+    }
+    group.api_members = merged;
+    Self::save_groups_locked(&locked);
+    Ok(Self::group_data_locked(&locked))
+  }
+
+  pub async fn delete_group(&self, group_id: String) -> Result<GroupData, String> {
+    let mut locked = self.inner.lock().await;
+    locked.groups.retain(|g| g.id != group_id);
+    locked.group_runs.remove(&group_id);
+    Self::save_groups_locked(&locked);
+    Ok(Self::group_data_locked(&locked))
+  }
+
+  async fn group_append_msg(&self, group_id: &str, author: &str, role: &str, text: &str) {
+    let mut locked = self.inner.lock().await;
+    if let Some(g) = locked.groups.iter_mut().find(|g| g.id == group_id) {
+      g.transcript.push(GroupMsg {
+        author: author.to_string(),
+        role: role.to_string(),
+        text: text.to_string(),
+        ts_ms: now_ms(),
+      });
+      if g.transcript.len() > 500 {
+        let overflow = g.transcript.len() - 500;
+        g.transcript.drain(0..overflow);
+      }
+      Self::save_groups_locked(&locked);
+    }
+  }
+
+  async fn group_set_phase(&self, group_id: &str, phase: Option<String>) {
+    let mut locked = self.inner.lock().await;
+    match phase {
+      Some(p) => {
+        locked.group_runs.insert(group_id.to_string(), p);
+      }
+      None => {
+        locked.group_runs.remove(group_id);
+      }
+    }
+  }
+
+  /// 发起一轮群聊：立即返回，后台按模式驱动各成员作答，前端轮询进度。
+  pub async fn send_group_message(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    group_id: String,
+    text: String,
+  ) -> Result<GroupData, String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+      return Err("消息不能为空".to_string());
+    }
+    {
+      let mut locked = self.inner.lock().await;
+      if locked.group_runs.contains_key(&group_id) {
+        return Err("这个群聊正在进行上一轮，等它结束再发".to_string());
+      }
+      if !locked.groups.iter().any(|g| g.id == group_id) {
+        return Err("群聊不存在".to_string());
+      }
+      locked
+        .group_runs
+        .insert(group_id.clone(), "准备中…".to_string());
+    }
+    let mgr = Arc::clone(self);
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+      mgr.run_group_round(&app2, &group_id, &text).await;
+    });
+    Ok(self.get_group_data().await)
+  }
+
+  async fn run_group_round(self: &Arc<Self>, app: &AppHandle, group_id: &str, raw_text: &str) {
+    let group = {
+      let locked = self.inner.lock().await;
+      locked.groups.iter().find(|g| g.id == group_id).cloned()
+    };
+    let Some(group) = group else {
+      self.group_set_phase(group_id, None).await;
+      return;
+    };
+    // 解析 @点名：命中成员名/别名 → 只问被点名者；@全体 或无点名 → 全部成员。
+    let aliases: HashMap<AccountKey, String> = {
+      let locked = self.inner.lock().await;
+      locked
+        .store
+        .accounts
+        .iter()
+        .map(|a| {
+          (
+            AccountKey {
+              provider_id: a.provider_id.clone(),
+              uuid: a.uuid.clone(),
+            },
+            a.alias.clone(),
+          )
+        })
+        .collect()
+    };
+    #[derive(Clone)]
+    enum Target {
+      Muse(AccountKey, String),
+      Api(ApiMemberDef),
+    }
+    let mut all_targets: Vec<Target> = Vec::new();
+    for k in &group.member_keys {
+      if let Some(alias) = aliases.get(k) {
+        all_targets.push(Target::Muse(k.clone(), alias.clone()));
+      }
+    }
+    for m in &group.api_members {
+      if !m.name.trim().is_empty() {
+        all_targets.push(Target::Api(m.clone()));
+      }
+    }
+    let mentioned_all = raw_text.contains("@全体") || raw_text.to_lowercase().contains("@all");
+    let mut targets: Vec<Target> = Vec::new();
+    if !mentioned_all {
+      for t in &all_targets {
+        let name = match t {
+          Target::Muse(_, alias) => alias.as_str(),
+          Target::Api(m) => m.name.as_str(),
+        };
+        if !name.is_empty() && raw_text.contains(&format!("@{name}")) {
+          targets.push(t.clone());
+        }
+      }
+    }
+    if targets.is_empty() {
+      targets = all_targets.clone();
+    }
+    if targets.is_empty() {
+      self
+        .group_append_msg(group_id, "系统", "system", "这个群聊还没有成员，先在左侧设置里添加 Muse 账号或 API 成员。")
+        .await;
+      self.group_set_phase(group_id, None).await;
+      return;
+    }
+    self.group_append_msg(group_id, "我", "user", raw_text).await;
+    let ctx = group.shared_context.trim().to_string();
+    let with_ctx = |body: String| -> String {
+      if ctx.is_empty() {
+        body
+      } else {
+        format!("【共享上下文】{ctx}\n\n{body}")
+      }
+    };
+    let ask = |target: Target, prompt: String| {
+      let mgr = Arc::clone(self);
+      let app = app.clone();
+      async move {
+        match &target {
+          Target::Muse(key, _) => mgr.ask_muse_member(&app, key, &prompt).await,
+          Target::Api(m) => Self::ask_api_member(m, &prompt).await,
+        }
+      }
+    };
+    let target_name = |t: &Target| -> String {
+      match t {
+        Target::Muse(_, alias) => alias.clone(),
+        Target::Api(m) => m.name.clone(),
+      }
+    };
+    match group.mode.as_str() {
+      "review" => {
+        let mut prior: Vec<(String, String)> = Vec::new();
+        for (i, t) in targets.iter().enumerate() {
+          let name = target_name(t);
+          self
+            .group_set_phase(group_id, Some(format!("等待「{name}」{}…", if i == 0 { "作答" } else { "评审" })))
+            .await;
+          let prompt = if i == 0 {
+            with_ctx(raw_text.to_string())
+          } else {
+            let mut p = format!("原始问题：{raw_text}\n\n");
+            for (a, r) in &prior {
+              p.push_str(&format!("【{a} 的回答】\n{r}\n\n"));
+            }
+            p.push_str("请评审上面的回答：指出问题与不足，给出改进意见或更好的答案。");
+            with_ctx(p)
+          };
+          match ask(t.clone(), prompt).await {
+            Ok(reply) => {
+              self.group_append_msg(group_id, &name, "member", &reply).await;
+              prior.push((name, reply));
+            }
+            Err(e) => {
+              self
+                .group_append_msg(group_id, "系统", "system", &format!("「{name}」未能作答：{e}"))
+                .await;
+            }
+          }
+        }
+      }
+      "relay" => {
+        let mut prev: Option<(String, String)> = None;
+        for t in targets.iter() {
+          let name = target_name(t);
+          self
+            .group_set_phase(group_id, Some(format!("等待「{name}」接力…")))
+            .await;
+          let prompt = match &prev {
+            None => with_ctx(raw_text.to_string()),
+            Some((pa, pr)) => with_ctx(format!(
+              "原始需求：{raw_text}\n\n【上一位成员「{pa}」的输出】\n{pr}\n\n请在此基础上接力：承接它的结果继续完善、推进或补足，最终给出你的完整版本。"
+            )),
+          };
+          match ask(t.clone(), prompt).await {
+            Ok(reply) => {
+              self.group_append_msg(group_id, &name, "member", &reply).await;
+              prev = Some((name, reply));
+            }
+            Err(e) => {
+              self
+                .group_append_msg(group_id, "系统", "system", &format!("「{name}」未能作答：{e}"))
+                .await;
+            }
+          }
+        }
+      }
+      _ => {
+        // parallel：逐个独立作答（互不可见），结果依次呈现。
+        for t in targets.iter() {
+          let name = target_name(t);
+          self
+            .group_set_phase(group_id, Some(format!("等待「{name}」作答…")))
+            .await;
+          match ask(t.clone(), with_ctx(raw_text.to_string())).await {
+            Ok(reply) => {
+              self.group_append_msg(group_id, &name, "member", &reply).await;
+            }
+            Err(e) => {
+              self
+                .group_append_msg(group_id, "系统", "system", &format!("「{name}」未能作答：{e}"))
+                .await;
+            }
+          }
+        }
+      }
+    }
+    self.group_set_phase(group_id, None).await;
+  }
+
+  /// 取得成员账号可驱动的视图：已有暖/前台视图直接用，否则预热拉起后等待就绪。
+  #[cfg(desktop)]
+  async fn group_member_webview(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    key: &AccountKey,
+  ) -> Result<tauri::Webview, String> {
+    let existing = {
+      let locked = self.inner.lock().await;
+      locked
+        .warm_pool
+        .get(key)
+        .map(|e| e.webview_label.clone())
+    };
+    if let Some(label) = existing {
+      if let Some(wv) = app.get_webview(&label) {
+        return Ok(wv);
+      }
+    }
+    let account = {
+      let locked = self.inner.lock().await;
+      locked
+        .store
+        .accounts
+        .iter()
+        .find(|a| a.provider_id == key.provider_id && a.uuid == key.uuid)
+        .cloned()
+        .ok_or_else(|| "成员账号不存在".to_string())?
+    };
+    self.prewarm_desktop_account(app, account).await?;
+    for _ in 0..40 {
+      let label = {
+        let locked = self.inner.lock().await;
+        locked.warm_pool.get(key).map(|e| e.webview_label.clone())
+      };
+      if let Some(label) = label {
+        if let Some(wv) = app.get_webview(&label) {
+          return Ok(wv);
+        }
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    Err("成员视图启动超时".to_string())
+  }
+
+  /// 驱动一个 Muse 成员：在其视图里新开对话、发问、等回复完成并提取文本。
+  #[cfg(desktop)]
+  async fn ask_muse_member(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    key: &AccountKey,
+    prompt: &str,
+  ) -> Result<String, String> {
+    let wv = self.group_member_webview(app, key).await?;
+    let entry = get_provider(&key.provider_id).info.entry_url;
+    let entry_url = Url::parse(&entry).map_err(|_| "入口地址无效".to_string())?;
+    let _ = wv.navigate(entry_url);
+    // 等输入框出现
+    let mut ready = false;
+    for _ in 0..40 {
+      tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+      if let Some(r) = Self::eval_string_result(&wv, GROUP_COMPOSER_CHECK_JS).await {
+        if r == "yes" {
+          ready = true;
+          break;
+        }
+      }
+    }
+    if !ready {
+      if let Some(probe) = Self::eval_identity_probe(&wv).await {
+        if probe.logged_out {
+          return Err("该账号未登录".to_string());
+        }
+      }
+      return Err("页面未就绪（没找到输入框）".to_string());
+    }
+    let send_js = GROUP_SEND_JS.replace(
+      "__PROMPT_JSON__",
+      &serde_json::to_string(prompt).unwrap_or_else(|_| "\"\"".to_string()),
+    );
+    let sent = Self::eval_string_result(&wv, &send_js).await;
+    if sent.as_deref() != Some("sent") {
+      return Err("发送失败（没找到发送按钮）".to_string());
+    }
+    // 轮询回复：文本稳定且不在生成中即完成
+    let head: String = prompt.chars().take(30).collect();
+    let poll_js = GROUP_POLL_JS.replace(
+      "__HEAD_JSON__",
+      &serde_json::to_string(&head).unwrap_or_else(|_| "\"\"".to_string()),
+    );
+    let mut last_text = String::new();
+    let mut stable = 0u32;
+    for _ in 0..80 {
+      tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+      let Some(raw) = Self::eval_string_result(&wv, &poll_js).await else {
+        continue;
+      };
+      let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        continue;
+      };
+      let working = v.get("working").and_then(|x| x.as_bool()).unwrap_or(false);
+      let text = v
+        .get("text")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+      if !working && !text.is_empty() && text == last_text {
+        stable += 1;
+        if stable >= 2 {
+          return Ok(text);
+        }
+      } else {
+        stable = 0;
+      }
+      if !text.is_empty() {
+        last_text = text;
+      }
+    }
+    if !last_text.is_empty() {
+      return Ok(last_text);
+    }
+    Err("等待回复超时".to_string())
+  }
+
+  /// 外部 API 成员：OpenAI 兼容 chat/completions。
+  async fn ask_api_member(member: &ApiMemberDef, prompt: &str) -> Result<String, String> {
+    if member.base_url.is_empty() || member.model.is_empty() {
+      return Err("API 成员未配置接口地址或模型".to_string());
+    }
+    let url = format!("{}/chat/completions", member.base_url);
+    let body = serde_json::json!({
+      "model": member.model,
+      "messages": [
+        { "role": "user", "content": prompt }
+      ]
+    });
+    let client = reqwest::Client::builder()
+      .timeout(std::time::Duration::from_secs(120))
+      .build()
+      .map_err(|e| e.to_string())?;
+    let mut req = client
+      .post(&url)
+      .header("Content-Type", "application/json")
+      .body(serde_json::to_string(&body).map_err(|e| e.to_string())?);
+    if !member.api_key.is_empty() {
+      req = req.header("Authorization", format!("Bearer {}", member.api_key));
+    }
+    let resp = req.send().await.map_err(|e| format!("请求失败：{e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+      return Err(format!("接口返回 {status}：{}", text.chars().take(160).collect::<String>()));
+    }
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|_| "接口响应不是 JSON".to_string())?;
+    let content = v
+      .get("choices")
+      .and_then(|c| c.get(0))
+      .and_then(|c| c.get("message"))
+      .and_then(|m| m.get("content"))
+      .and_then(|c| c.as_str())
+      .unwrap_or("")
+      .trim()
+      .to_string();
+    if content.is_empty() {
+      return Err("接口没有返回内容".to_string());
+    }
+    Ok(content)
+  }
+
+  /// 记录页面异常状态（探针检出错误页/受限页）：集合变化时才发快照。
+  async fn apply_page_error(self: &Arc<Self>, app: &AppHandle, key: &AccountKey, is_error: bool) {
+    let snap = {
+      let mut locked = self.inner.lock().await;
+      let changed = if is_error {
+        locked.page_errors.insert(key.clone())
+      } else {
+        locked.page_errors.remove(key)
+      };
+      if !changed {
+        return;
+      }
+      Self::snapshot_from_locked(&locked)
+    };
+    self.emit_snapshot(app, &snap);
+  }
+
+  /// 清理重登：关掉该账号所有视图、删除其隔离数据存储（登录态全清），
+  /// 置为已退出并重新打开到登录入口。账号本身与备注保留。
+  pub async fn reset_account_session(
+    self: &Arc<Self>,
+    app: &AppHandle,
+    raw_provider: &str,
+    raw_uuid: &str,
+  ) -> Result<ManagerSnapshot, String> {
+    let provider_id = ProviderId::parse(raw_provider).ok_or_else(|| "无效的服务标识".to_string())?;
+    let uuid = normalize_uuid(raw_uuid).ok_or_else(|| "无效的账号 UUID".to_string())?;
+    let key = AccountKey {
+      provider_id: provider_id.clone(),
+      uuid: uuid.clone(),
+    };
+    {
+      let mut locked = self.inner.lock().await;
+      if !locked
+        .store
+        .accounts
+        .iter()
+        .any(|a| a.provider_id == provider_id && a.uuid == uuid)
+      {
+        return Err("未找到该账号".to_string());
+      }
+      let active_matches = locked
+        .active_slot
+        .as_ref()
+        .map(|s| s.account_key == key)
+        .unwrap_or(false);
+      if active_matches {
+        let next_seq = self.current_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        self.hide_foreground_slot(app, next_seq, &mut locked).await;
+      }
+      #[cfg(desktop)]
+      {
+        locked.prewarm_failed.remove(&key);
+        if let Some(warm_entry) = locked.warm_pool.remove(&key) {
+          Self::close_warm_entry(app, warm_entry);
+          Self::apply_desktop_layout_locked(app, &locked);
+        }
+      }
+      if let Some(acc) = locked
+        .store
+        .accounts
+        .iter_mut()
+        .find(|a| a.provider_id == provider_id && a.uuid == uuid)
+      {
+        acc.auth_state = AuthState::LoggedOut;
+        acc.session_state = "unknown".to_string();
+        acc.pending_detail = String::new();
+        acc.view_error = false;
+      }
+      locked.session_states.remove(&key);
+      locked.pending_details.remove(&key);
+      locked.page_errors.remove(&key);
+      save_store_atomic(&locked.store_path, &locked.store)?;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    let _ = self.delete_profile_for_key(app, &uuid).await;
+    self.switch_account_internal(app, key, false).await
+  }
+
   pub async fn remove_account(
     &self,
     app: &AppHandle,
@@ -2466,7 +3513,7 @@ impl SessionManager {
     let provider_id = ProviderId::parse(raw_provider).ok_or_else(|| "无效的服务标识".to_string())?;
     let uuid = normalize_uuid(raw_uuid).ok_or_else(|| "无效的账号 UUID".to_string())?;
     let key = AccountKey {
-      provider_id,
+      provider_id: provider_id.clone(),
       uuid: uuid.clone(),
     };
 
@@ -2548,9 +3595,9 @@ impl SessionManager {
     raw_provider: &str,
   ) -> Result<ManagerSnapshot, String> {
     let provider_id = ProviderId::parse(raw_provider).ok_or_else(|| "无效的服务标识".to_string())?;
-    let homepage = get_provider(provider_id).info.homepage_url;
+    let homepage = get_provider(&provider_id).info.homepage_url;
     let _ = app;
-    platform::open_external_browser(homepage)?;
+    platform::open_external_browser(&homepage)?;
     Ok(self.get_snapshot().await)
   }
 
@@ -2737,7 +3784,7 @@ impl SessionManager {
         .accounts
         .iter()
         .find(|a| a.uuid == uuid)
-        .map(|a| a.provider_id)
+        .map(|a| a.provider_id.clone())
     };
     let Some(provider_id) = provider_id else {
       return Ok(self.get_snapshot().await);
@@ -2756,7 +3803,7 @@ impl SessionManager {
     }
     let (provider_id, target_uuid) = {
       let locked = self.inner.lock().await;
-      let pid = locked.selected_provider_id;
+      let pid = locked.selected_provider_id.clone();
       let accounts: Vec<_> = locked
         .store
         .accounts
@@ -2824,6 +3871,10 @@ impl SessionManager {
               mgr
                 .apply_session_state(&app_handle, key.clone(), &probe.session_state, &probe.pending_detail)
                 .await;
+              mgr.apply_page_error(&app_handle, &key, probe.page_error).await;
+              if probe.session_state == "waiting" {
+                mgr.maybe_auto_approve(&app_handle, &wv, &key).await;
+              }
               if probe.is_auth {
                 let resolved_identity = if !probe.email.is_empty() {
                   Some(probe.email)
@@ -2891,10 +3942,10 @@ impl SessionManager {
         .store
         .accounts
         .iter()
-        .filter(|a| get_provider(a.provider_id).info.enabled)
+        .filter(|a| get_provider(&a.provider_id).info.enabled)
         .filter(|a| {
           let k = AccountKey {
-            provider_id: a.provider_id,
+            provider_id: a.provider_id.clone(),
             uuid: a.uuid.clone(),
           };
           !locked.warm_pool.contains_key(&k)
@@ -2912,7 +3963,7 @@ impl SessionManager {
       let account = candidates[idx].clone();
       let vid = self.view_counter.fetch_add(1, Ordering::SeqCst);
       let key = AccountKey {
-        provider_id: account.provider_id,
+        provider_id: account.provider_id.clone(),
         uuid: account.uuid.clone(),
       };
       locked.transient_probes.insert((key, vid));
@@ -2921,7 +3972,7 @@ impl SessionManager {
     };
 
     let key = AccountKey {
-      provider_id: account.provider_id,
+      provider_id: account.provider_id.clone(),
       uuid: account.uuid.clone(),
     };
     let webview_label = format!("account-{view_instance_id}");
@@ -2950,6 +4001,7 @@ impl SessionManager {
         proxy_url,
         account.gd_cookie.clone(),
         account.gd_domain.clone(),
+        account.import_cookie.clone(),
       );
       let main_win = app.get_window("main").ok_or_else(|| "主窗口不存在".to_string())?;
       let (init_pos, init_size) = Self::initial_hidden_child_rect(&main_win);
@@ -2982,6 +4034,7 @@ impl SessionManager {
         self
           .apply_session_state(app, key.clone(), &probe.session_state, &probe.pending_detail)
           .await;
+        self.apply_page_error(app, &key, probe.page_error).await;
         if probe.is_auth {
           let resolved_identity = if !probe.email.is_empty() {
             Some(probe.email)
@@ -3008,11 +4061,11 @@ impl SessionManager {
             .await;
         }
       }
-      if account.provider_id == ProviderId::Muse {
+      if account.provider_id == ProviderId::muse() {
         if let Some(payload) = Self::eval_chat_search(&created_wv).await {
           if payload.ok {
             let key2 = AccountKey {
-              provider_id: account.provider_id,
+              provider_id: account.provider_id.clone(),
               uuid: account.uuid.clone(),
             };
             self.stash_chat_index(&key2, payload.items).await;
@@ -3103,8 +4156,8 @@ impl SessionManager {
         if !locked.conflicts.is_empty() {
           return Err("存在 UUID 归属冲突，已停留在管理页".to_string());
         }
-        if !get_provider(key.provider_id).info.enabled {
-          return Err(format!("{} 尚未开放应用内嵌", get_provider(key.provider_id).info.name));
+        if !get_provider(&key.provider_id).info.enabled {
+          return Err(format!("{} 尚未开放应用内嵌", get_provider(&key.provider_id).info.name));
         }
         if locked.store.pending_cleanup.contains(&key) {
           self.hide_foreground_slot(app, next_seq, &mut locked).await;
@@ -3123,7 +4176,7 @@ impl SessionManager {
             return Ok(Self::snapshot_from_locked(&locked));
           };
 
-          locked.selected_provider_id = key.provider_id;
+          locked.selected_provider_id = key.provider_id.clone();
           locked.notice = None;
           locked.prewarm_failed.remove(&key);
           self.hide_foreground_slot(app, next_seq, &mut locked).await;
@@ -3147,7 +4200,7 @@ impl SessionManager {
               } else {
                 locked
                   .last_active_per_provider
-                  .insert(key.provider_id, key.clone());
+                  .insert(key.provider_id.clone(), key.clone());
                 locked.active_slot = Some(ActiveSessionSlot {
                   account_key: key.clone(),
                   view_instance_id: vid,
@@ -3157,7 +4210,7 @@ impl SessionManager {
                 self.active_view_id.store(vid, Ordering::SeqCst);
                 let title = format!(
                   "{} · {}",
-                  get_provider(key.provider_id).info.short_name,
+                  get_provider(&key.provider_id).info.short_name,
                   acc.alias
                 );
                 if let Some(main_win) = app.get_window("main") {
@@ -3256,18 +4309,27 @@ impl SessionManager {
     proxy_url: Option<Url>,
     gd_cookie: String,
     gd_domain: String,
+    import_cookie: String,
   ) -> tauri::webview::WebviewBuilder<tauri::Wry> {
     // GLaDOS 视图：同样在页面脚本运行前种下整行 Cookie。
-    let gd_init_script = if key.provider_id == ProviderId::Glados {
+    let gd_init_script = if key.provider_id == ProviderId::glados() {
       glados_cookie_script(&gd_cookie, &gd_domain)
     } else {
       "void 0;".to_string()
+    };
+    let import_init_script = if import_cookie.trim().is_empty() {
+      "void 0;".to_string()
+    } else {
+      let spec = get_provider(&key.provider_id);
+      let primary = spec.allowed_hosts.first().cloned().unwrap_or_default();
+      import_cookie_script(&import_cookie, &spec.allowed_hosts, &primary)
     };
     let alive_nav = Arc::clone(&alive_flag);
     let mgr_for_nav = Arc::clone(self);
     let app_for_nav = app.clone();
     let allow_blank_nav = Arc::clone(&allow_blank);
-    let provider_id = key.provider_id;
+    let provider_id = key.provider_id.clone();
+    let provider_id_nav = provider_id.clone();
     let key_for_nav = key.clone();
 
     let alive_popup = Arc::clone(&alive_flag);
@@ -3292,12 +4354,13 @@ impl SessionManager {
     .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
     .initialization_script(LOGIN_CAPTURE_INIT_JS)
     .initialization_script(&gd_init_script)
+    .initialization_script(&import_init_script)
     .on_navigation(move |url| {
       if !alive_nav.load(Ordering::SeqCst) {
         return false;
       }
       let can_blank = allow_blank_nav.load(Ordering::SeqCst);
-      match classify_top_level_url(provider_id, url, can_blank) {
+      match classify_top_level_url(&provider_id_nav, url, can_blank) {
         NavigationDecision::AllowBlank => true,
         NavigationDecision::AllowHttps => true,
         NavigationDecision::ExternalGoogleOAuth => {
@@ -3320,7 +4383,7 @@ impl SessionManager {
       {
         return tauri::webview::NewWindowResponse::Deny;
       }
-      let decision = classify_top_level_url(provider_id, &url, true);
+      let decision = classify_top_level_url(&provider_id, &url, true);
       match decision {
         NavigationDecision::ExternalGoogleOAuth => {
           let mgr_ext = Arc::clone(&mgr_for_popup);
@@ -3344,6 +4407,7 @@ impl SessionManager {
       let popup_label_for_close = popup_label.clone();
       let popup_label_for_slot = popup_label.clone();
 
+      let provider_id_popup = provider_id.clone();
       let alive_popup_nav = Arc::clone(&alive_popup);
       let active_vid_popup_nav = Arc::clone(&active_vid_popup);
       let app_popup_nav = app_for_popup.clone();
@@ -3372,7 +4436,7 @@ impl SessionManager {
           }
           return false;
         }
-        match classify_top_level_url(provider_id, nav_url, true) {
+        match classify_top_level_url(&provider_id_popup, nav_url, true) {
           NavigationDecision::AllowBlank => true,
           NavigationDecision::AllowHttps => {
             if let Some(host) = nav_url.host_str() {
@@ -3502,7 +4566,7 @@ impl SessionManager {
     let allow_blank = Arc::new(AtomicBool::new(true));
     let alive_flag = Arc::new(AtomicBool::new(true));
     let key = AccountKey {
-      provider_id: account.provider_id,
+      provider_id: account.provider_id.clone(),
       uuid: account.uuid.clone(),
     };
 
@@ -3552,6 +4616,7 @@ impl SessionManager {
       proxy_url,
       account.gd_cookie.clone(),
       account.gd_domain.clone(),
+      account.import_cookie.clone(),
     );
 
     let (init_pos, init_size) = Self::initial_hidden_child_rect(&main_win);
@@ -3642,7 +4707,7 @@ impl SessionManager {
     view_instance_id: u64,
     loaded_url: Url,
   ) {
-    if classify_top_level_url(key.provider_id, &loaded_url, false) != NavigationDecision::AllowHttps {
+    if classify_top_level_url(&key.provider_id, &loaded_url, false) != NavigationDecision::AllowHttps {
       return;
     }
 
@@ -3784,10 +4849,10 @@ impl SessionManager {
           }
           locked
             .last_active_per_provider
-            .insert(key.provider_id, key.clone());
+            .insert(key.provider_id.clone(), key.clone());
           let title = format!(
             "{} · {}",
-            get_provider(key.provider_id).info.short_name,
+            get_provider(&key.provider_id).info.short_name,
             acc.alias
           );
           if let Some(main_win) = app.get_window("main") {
@@ -3824,7 +4889,7 @@ impl SessionManager {
     account: AccountRecord,
   ) -> Result<(), String> {
     let key = AccountKey {
-      provider_id: account.provider_id,
+      provider_id: account.provider_id.clone(),
       uuid: account.uuid.clone(),
     };
     let app_data_dir = {
@@ -3883,6 +4948,7 @@ impl SessionManager {
       proxy_url,
       account.gd_cookie.clone(),
       account.gd_domain.clone(),
+      account.import_cookie.clone(),
     );
 
     let sync_res = (|| {
@@ -3952,11 +5018,11 @@ impl SessionManager {
             .store
             .accounts
             .iter()
-            .filter(|a| get_provider(a.provider_id).info.enabled)
-            .filter(|a| Self::provider_warm_eligible(a.provider_id))
+            .filter(|a| get_provider(&a.provider_id).info.enabled)
+            .filter(|a| Self::provider_warm_eligible(&a.provider_id))
             .find(|a| {
               let k = AccountKey {
-                provider_id: a.provider_id,
+                provider_id: a.provider_id.clone(),
                 uuid: a.uuid.clone(),
               };
               !locked.warm_pool.contains_key(&k)
@@ -3974,7 +5040,7 @@ impl SessionManager {
 
       if let Some(account) = next_cold {
         let failed_key = AccountKey {
-          provider_id: account.provider_id,
+          provider_id: account.provider_id.clone(),
           uuid: account.uuid.clone(),
         };
         if mgr.prewarm_desktop_account(&app_handle, account).await.is_err() {
@@ -4040,8 +5106,8 @@ impl SessionManager {
         return;
       }
       let cur_seq = self.current_seq.load(Ordering::SeqCst);
-      let entry_ok = Url::parse(get_provider(key.provider_id).info.entry_url)
-        .map(|u| is_verified_callback_origin(key.provider_id, &u))
+      let entry_ok = Url::parse(&get_provider(&key.provider_id).info.entry_url)
+        .map(|u| is_verified_callback_origin(&key.provider_id, &u))
         .unwrap_or(false);
       locked.pending_external_auth = Some(PendingExternalAuth {
         account_key: key.clone(),
@@ -4139,6 +5205,10 @@ impl SessionManager {
         mgr
           .apply_session_state(&app, key.clone(), &probe.session_state, &probe.pending_detail)
           .await;
+        mgr.apply_page_error(&app, &key, probe.page_error).await;
+        if probe.session_state == "waiting" {
+          mgr.maybe_auto_approve(&app, &main_wv, &key).await;
+        }
 
         if let Some(idx) = probe.pending_hotkey {
           let mgr_hotkey = Arc::clone(&mgr);
@@ -4274,6 +5344,7 @@ impl SessionManager {
       .trim()
       .to_string();
 
+    let page_error = val.get("pageError").and_then(|v| v.as_bool()).unwrap_or(false);
     let pending_detail = val
       .get("pendingDetail")
       .and_then(|v| v.as_str())
@@ -4293,6 +5364,7 @@ impl SessionManager {
       pending_hotkey,
       session_state,
       pending_detail,
+      page_error,
     })
   }
 
@@ -4337,7 +5409,7 @@ impl SessionManager {
     view_instance_id: u64,
   ) -> Option<ChatSearchPayload> {
     let key = AccountKey {
-      provider_id: account.provider_id,
+      provider_id: account.provider_id.clone(),
       uuid: account.uuid.clone(),
     };
     let parsed_uuid = Uuid::parse_str(&account.uuid).ok()?;
@@ -4362,6 +5434,7 @@ impl SessionManager {
       proxy_url,
       account.gd_cookie.clone(),
       account.gd_domain.clone(),
+      account.import_cookie.clone(),
     );
     let main_win = app.get_window("main")?;
     let (init_pos, init_size) = Self::initial_hidden_child_rect(&main_win);
@@ -4387,7 +5460,7 @@ impl SessionManager {
     account: &AccountRecord,
   ) -> Option<ChatSearchPayload> {
     let key = AccountKey {
-      provider_id: account.provider_id,
+      provider_id: account.provider_id.clone(),
       uuid: account.uuid.clone(),
     };
     let warm_label = {
@@ -4415,6 +5488,83 @@ impl SessionManager {
 
   fn chat_index_path(app_data_dir: &std::path::Path) -> PathBuf {
     app_data_dir.join("chat-index.json")
+  }
+
+  fn custom_sites_path(app_data_dir: &std::path::Path) -> PathBuf {
+    app_data_dir.join("custom-sites.json")
+  }
+
+  fn load_custom_sites_file(app_data_dir: &std::path::Path) -> Vec<CustomSiteDef> {
+    std::fs::read_to_string(Self::custom_sites_path(app_data_dir))
+      .ok()
+      .and_then(|text| serde_json::from_str::<Vec<CustomSiteDef>>(&text).ok())
+      .unwrap_or_default()
+  }
+
+  fn save_custom_sites_file(&self, locked: &InnerState) {
+    if let Ok(text) = serde_json::to_string_pretty(&locked.custom_sites) {
+      let _ = std::fs::write(Self::custom_sites_path(&locked.app_data_dir), text);
+    }
+  }
+
+  fn reregister_custom_sites(&self, locked: &InnerState) {
+    crate::providers::register_custom_providers(
+      locked
+        .custom_sites
+        .iter()
+        .filter_map(|d| crate::providers::make_custom_spec(&d.id, &d.name, &d.entry_url))
+        .collect(),
+    );
+  }
+
+  /// 新增自定义服务：任意 https 站点，之后可像内置服务一样加账号隔离登录。
+  pub async fn add_custom_site(
+    &self,
+    name: String,
+    entry_url: String,
+  ) -> Result<ManagerSnapshot, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+      return Err("服务名称不能为空".to_string());
+    }
+    let parsed = Url::parse(entry_url.trim()).map_err(|_| "网址格式不正确".to_string())?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+      return Err("只支持 https 网址".to_string());
+    }
+    let mut locked = self.inner.lock().await;
+    if locked
+      .custom_sites
+      .iter()
+      .any(|d| d.entry_url.eq_ignore_ascii_case(entry_url.trim()))
+    {
+      return Err("这个网址已经添加过了".to_string());
+    }
+    let def = CustomSiteDef {
+      id: Uuid::new_v4().hyphenated().to_string(),
+      name,
+      entry_url: entry_url.trim().to_string(),
+    };
+    locked.custom_sites.push(def.clone());
+    self.reregister_custom_sites(&locked);
+    self.save_custom_sites_file(&locked);
+    locked.selected_provider_id = ProviderId::custom(&def.id);
+    Ok(Self::snapshot_from_locked(&locked))
+  }
+
+  /// 删除自定义服务：名下还有账号时拒绝（先删账号）。
+  pub async fn remove_custom_site(&self, def_id: String) -> Result<ManagerSnapshot, String> {
+    let pid = ProviderId::custom(&def_id);
+    let mut locked = self.inner.lock().await;
+    if locked.store.accounts.iter().any(|a| a.provider_id == pid) {
+      return Err("这个服务下还有账号，先删除账号再删除服务".to_string());
+    }
+    locked.custom_sites.retain(|d| d.id != def_id);
+    self.reregister_custom_sites(&locked);
+    self.save_custom_sites_file(&locked);
+    if locked.selected_provider_id == pid {
+      locked.selected_provider_id = ProviderId::muse();
+    }
+    Ok(Self::snapshot_from_locked(&locked))
   }
 
   fn load_chat_index_file(
@@ -4541,11 +5691,11 @@ impl SessionManager {
       let mut cached: Vec<(AccountRecord, Vec<ChatSearchItem>)> = Vec::new();
       let mut live: Vec<AccountRecord> = Vec::new();
       for a in locked.store.accounts.iter() {
-        if a.provider_id != ProviderId::Muse {
+        if a.provider_id != ProviderId::muse() {
           continue;
         }
         let k = AccountKey {
-          provider_id: a.provider_id,
+          provider_id: a.provider_id.clone(),
           uuid: a.uuid.clone(),
         };
         if locked.store.pending_cleanup.contains(&k) {
@@ -4600,7 +5750,7 @@ impl SessionManager {
         Some(payload) if payload.ok => {
           searched_count += 1;
           let key = AccountKey {
-            provider_id: account.provider_id,
+            provider_id: account.provider_id.clone(),
             uuid: account.uuid.clone(),
           };
           self.stash_chat_index(&key, payload.items.clone()).await;
@@ -4632,7 +5782,7 @@ impl SessionManager {
     let provider_id =
       ProviderId::parse(raw_provider).ok_or_else(|| "无效的服务标识".to_string())?;
     let key = AccountKey {
-      provider_id,
+      provider_id: provider_id.clone(),
       uuid: raw_uuid.to_string(),
     };
     let url = format!("https://muse.ai/chat/{session_id}");
@@ -5009,7 +6159,7 @@ impl SessionManager {
             !c.is_empty() && c != "额度充足" && c != "正在同步额度…"
           })
           .unwrap_or(false);
-      if key.provider_id != ProviderId::Glados {
+      if key.provider_id != ProviderId::glados() {
         if got_quota {
           locked.quota_miss.remove(&key);
         } else {
@@ -5125,7 +6275,7 @@ impl SessionManager {
         if is_fg {
           let title = format!(
             "{} · {}",
-            get_provider(key.provider_id).info.short_name,
+            get_provider(&key.provider_id).info.short_name,
             new_alias
           );
           #[cfg(desktop)]
@@ -5159,4 +6309,5 @@ struct DesktopProbeResult {
   pending_hotkey: Option<u8>,
   session_state: String,
   pending_detail: String,
+  page_error: bool,
 }
