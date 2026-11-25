@@ -28,7 +28,6 @@ type ModalMode =
 
 const PROVIDER_LOGOS: Record<ProviderId, { src: string; fullBleed: boolean }> = {
   muse: { src: "/logos/muse.png", fullBleed: true },
-  cue: { src: "/logos/cue.svg", fullBleed: true },
   glados: { src: "/logos/glados.svg", fullBleed: true },
 };
 
@@ -84,7 +83,6 @@ const updateState: {
 
 const scrollOffsets: Record<ProviderId, number> = {
   muse: 0,
-  cue: 0,
   glados: 0,
 };
 
@@ -698,7 +696,7 @@ function renderModal(provider: ProviderInfo): string {
             <input id="modal-proxy-follow" type="checkbox" ${modal.followSystem ? "checked" : ""} />
             <span>跟随系统代理：自动读取 macOS 系统代理设置（如 Clash / Surge 开启的系统代理），勾选后忽略上方手动地址</span>
           </label>
-          <div class="modal-desc" style="margin-top:14px;">保活视图上限（仅 Muse）：后台保持就绪的账号视图数量，可填 1-32 任意数值；留空 = 默认 6，填 0 = 不限。越多切换越快、内存占用越高；闲置超过 30 分钟的保活视图会自动回收，冷账号的额度会通过临时视图轮流刷新，不占用保活名额。GLaDOS / Cue 不保活，离开即关、冷加载打开。</div>
+          <div class="modal-desc" style="margin-top:14px;">保活视图上限（仅 Muse）：后台保持就绪的账号视图数量，可填 1-32 任意数值；留空 = 默认 6，填 0 = 不限。越多切换越快、内存占用越高；闲置超过 30 分钟的保活视图会自动回收，冷账号的额度会通过临时视图轮流刷新，不占用保活名额。GLaDOS 不保活，离开即关、冷加载打开。</div>
           <input id="modal-warm-limit" class="modal-input" type="number" min="0" max="32" step="1" placeholder="默认 6" value="${escapeHtml(modal.warmLimit)}" />
           ${snapshot ? `<div class="modal-desc" style="margin-top:10px;">当前保活视图：${snapshot.warmViewCount} 个（上限 ${snapshot.warmViewLimit === null ? "默认 6" : snapshot.warmViewLimit === 0 ? "不限" : snapshot.warmViewLimit}）</div>` : ""}
           <div class="modal-footer">

@@ -6,7 +6,6 @@ use url::Url;
 pub enum ProviderId {
   Muse,
   Glados,
-  Cue,
 }
 
 impl ProviderId {
@@ -14,7 +13,6 @@ impl ProviderId {
     match self {
       ProviderId::Muse => "muse",
       ProviderId::Glados => "glados",
-      ProviderId::Cue => "cue",
     }
   }
 
@@ -22,7 +20,6 @@ impl ProviderId {
     match value.trim().to_ascii_lowercase().as_str() {
       "muse" => Some(ProviderId::Muse),
       "glados" => Some(ProviderId::Glados),
-      "cue" => Some(ProviderId::Cue),
       _ => None,
     }
   }
@@ -97,20 +94,6 @@ pub const PROVIDERS: &[ProviderSpec] = &[
       "glados-facility.com",
       "railgun.info",
     ],
-  },
-  ProviderSpec {
-    info: ProviderInfo {
-      id: ProviderId::Cue,
-      name: "Cue · Manus",
-      short_name: "Cue",
-      enabled: true,
-      status_text: "已启用",
-      entry_url: "https://cue.im/",
-      homepage_url: "https://cue.im/",
-      callback_origins: &["https://cue.im"],
-      verified_methods: &["email", "google"],
-    },
-    allowed_hosts: &["cue.im", "manus.im"],
   },
 ];
 
