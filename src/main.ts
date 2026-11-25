@@ -1468,9 +1468,51 @@ function scrollGroupTranscript(): void {
   if (el) el.scrollTop = el.scrollHeight;
 }
 
-function showGroupError(err: unknown): void {
+function setGroupStatus(text: string, isError: boolean): void {
   const st = document.querySelector<HTMLElement>(".group-status");
-  if (st) st.textContent = String(err);
+  if (st) {
+    st.textContent = text;
+    st.style.color = isError ? "var(--danger)" : "";
+    st.style.fontWeight = isError ? "600" : "";
+  }
+}
+
+function showGroupError(err: unknown): void {
+  setGroupStatus(String(err), true);
+}
+
+function collectGroupForm(g: ChatGroupView) {
+  const name = document.querySelector<HTMLInputElement>("#g-name")?.value ?? g.name;
+  const mode = document.querySelector<HTMLSelectElement>("#g-mode")?.value ?? "parallel";
+  const memberKeys = Array.from(
+    document.querySelectorAll<HTMLInputElement>("[data-member-uuid]")
+  )
+    .filter((c) => c.checked)
+    .map((c) => ({ providerId: "muse", uuid: c.dataset.memberUuid ?? "" }));
+  const apiMembers = Array.from(document.querySelectorAll<HTMLElement>("[data-api-row]"))
+    .map((row) => {
+      const nameEl = row.querySelector<HTMLInputElement>(".g-api-name");
+      return {
+        id: nameEl?.dataset.apiId ?? "",
+        name: nameEl?.value ?? "",
+        baseUrl: row.querySelector<HTMLInputElement>(".g-api-base")?.value ?? "",
+        model: row.querySelector<HTMLInputElement>(".g-api-model")?.value ?? "",
+        apiKey: row.querySelector<HTMLInputElement>(".g-api-key")?.value || null,
+      };
+    })
+    .filter((m) => m.name.trim() || m.id);
+  const sharedContext = document.querySelector<HTMLTextAreaElement>("#g-context")?.value ?? "";
+  return { id: g.id, name, memberKeys, apiMembers, mode, sharedContext };
+}
+
+async function saveGroupForm(g: ChatGroupView): Promise<boolean> {
+  try {
+    groupData = await invoke<GroupData>("save_group", { input: collectGroupForm(g) });
+    return true;
+  } catch (err) {
+    setGroupStatus(`保存失败：${String(err)}`, true);
+    return false;
+  }
 }
 
 async function openGroupPanel(): Promise<void> {
@@ -1643,36 +1685,19 @@ function bindGroupPanel(): void {
       bindGroupPanelApiRemove();
     }
   });
-  document.querySelector("#g-save")?.addEventListener("click", async () => {
+  document.querySelector<HTMLButtonElement>("#g-save")?.addEventListener("click", async (ev) => {
     const g = currentGroup();
     if (!g) return;
-    const name = document.querySelector<HTMLInputElement>("#g-name")?.value ?? g.name;
-    const mode = document.querySelector<HTMLSelectElement>("#g-mode")?.value ?? "parallel";
-    const memberKeys = Array.from(
-      document.querySelectorAll<HTMLInputElement>("[data-member-uuid]")
-    )
-      .filter((c) => c.checked)
-      .map((c) => ({ providerId: "muse", uuid: c.dataset.memberUuid ?? "" }));
-    const apiMembers = Array.from(document.querySelectorAll<HTMLElement>("[data-api-row]"))
-      .map((row) => {
-        const nameEl = row.querySelector<HTMLInputElement>(".g-api-name");
-        return {
-          id: nameEl?.dataset.apiId ?? "",
-          name: nameEl?.value ?? "",
-          baseUrl: row.querySelector<HTMLInputElement>(".g-api-base")?.value ?? "",
-          model: row.querySelector<HTMLInputElement>(".g-api-model")?.value ?? "",
-          apiKey: row.querySelector<HTMLInputElement>(".g-api-key")?.value || null,
-        };
-      })
-      .filter((m) => m.name.trim() || m.id);
-    const sharedContext = document.querySelector<HTMLTextAreaElement>("#g-context")?.value ?? "";
-    try {
-      groupData = await invoke<GroupData>("save_group", {
-        input: { id: g.id, name, memberKeys, apiMembers, mode, sharedContext },
-      });
+    const btn = ev.currentTarget as HTMLButtonElement;
+    btn.disabled = true;
+    btn.textContent = "保存中…";
+    const ok = await saveGroupForm(g);
+    if (ok) {
       render();
-    } catch (err) {
-      showGroupError(err);
+      setGroupStatus(`设置已保存（${new Date().toLocaleTimeString()}）`, false);
+    } else {
+      btn.disabled = false;
+      btn.textContent = "保存设置";
     }
   });
   const deleteBtn = document.querySelector<HTMLButtonElement>("#g-delete");
@@ -1698,6 +1723,9 @@ function bindGroupPanel(): void {
     const input = document.querySelector<HTMLTextAreaElement>("#g-input");
     const text = (input?.value ?? "").trim();
     if (!text) return;
+    // 发送前先把当前表单设置存下：改了成员/模式没点保存也能直接生效。
+    const saved = await saveGroupForm(g);
+    if (!saved) return;
     try {
       groupData = await invoke<GroupData>("send_group_message", { groupId: g.id, text });
       render();

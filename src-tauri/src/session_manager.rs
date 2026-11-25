@@ -6027,46 +6027,20 @@ impl SessionManager {
   }
 
   /// 发送 macOS 系统通知（状态跃迁时调用，调用方负责去重）。
-  /// 先查授权状态再投递：authorized / provisional 走新式通道；未决定则
-  /// 先申请、同意后补发；申请被无弹窗拒绝或状态异常时改走旧式通道兜底，
-  /// 不再出现「调用了通知 API 却永远不到」的情况。
+  /// v0.10.1 起旧式通道（NSUserNotificationCenter）优先：新式通道在本应用
+  /// （ad-hoc 签名、无 willPresent 委托）上投递虽不报错，却会被系统静默
+  /// 收纳进通知中心——应用在前台时不弹横幅、不响声音（v0.10.0 实测）；
+  /// 旧通道在前台同样弹横幅带默认提示音（v0.6.4 实测），且自带同标题
+  /// 去堆叠。新式通道只保留给「通知」面板查授权状态与测试分支。
   fn notify(app: &AppHandle, title: &str, body: &str, thread: Option<String>) {
+    let _ = thread;
     let app = app.clone();
     let title = title.to_string();
     let body = body.to_string();
     tauri::async_runtime::spawn(async move {
-      if UN_DELIVERY_BROKEN.load(Ordering::Relaxed) {
-        let _ = app.run_on_main_thread(move || {
-          Self::post_notification_legacy(&title, &body);
-        });
-        return;
-      }
-      match Self::notification_auth_status(&app).await.as_str() {
-        "authorized" | "provisional" => {
-          let _ = app.run_on_main_thread(move || {
-            Self::post_notification(&title, &body, thread.as_deref());
-          });
-        }
-        "not_determined" => {
-          let (granted, err) = Self::request_notification_authorization(&app).await;
-          if granted {
-            let _ = app.run_on_main_thread(move || {
-              Self::post_notification(&title, &body, thread.as_deref());
-            });
-          } else {
-            eprintln!("[notify] 新式授权被拒（{err:?}），改走旧通道: {title}");
-            let _ = app.run_on_main_thread(move || {
-              Self::post_notification_legacy(&title, &body);
-            });
-          }
-        }
-        other => {
-          eprintln!("[notify] 授权状态为 {other}，改走旧通道: {title}");
-          let _ = app.run_on_main_thread(move || {
-            Self::post_notification_legacy(&title, &body);
-          });
-        }
-      }
+      let _ = app.run_on_main_thread(move || {
+        Self::post_notification_legacy(&title, &body);
+      });
     });
   }
 
